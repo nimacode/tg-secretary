@@ -264,8 +264,10 @@ async def _live_int(key: str, fallback: int) -> int:
 
 
 async def _credit_exhausted() -> bool:
-    """Hosted Claude metering: the platform sets CREDIT_LIMIT_USD; spend is summed locally."""
-    if settings.provider != "anthropic" or settings.credit_limit_usd <= 0:
+    """Direct-provider metering: the platform sets the cap; spend is summed locally."""
+    if settings.provider not in {"anthropic", "gemini"}:
+        return False
+    if settings.credit_limit_usd <= 0 and not (settings.provider == "gemini" and settings.hosted):
         return False
     return await db.usage_total() >= settings.credit_limit_usd
 
@@ -739,6 +741,18 @@ async def on_business_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
             conn_id=conn_id, chat_id=chat_id, role="user",
             content="[voice]", tg_message_id=msg.message_id,
         )
+        return
+
+    if await _credit_exhausted():
+        await db.append_message(
+            conn_id=conn_id, chat_id=chat_id, role="user",
+            content="[voice]", tg_message_id=msg.message_id,
+        )
+        if await _credit_notice_due():
+            await _notify_owner(
+                ctx, owner_chat_id,
+                "Credit used up: no replies until you top up.\nاعتبارت تموم شده؛ تا شارژ دوباره، جوابی فرستاده نمی\u200cشه.",
+            )
         return
 
     contact_name = _contact_name(msg)

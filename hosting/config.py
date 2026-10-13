@@ -1,7 +1,16 @@
 from pathlib import Path
+from typing import Literal
+
+from pydantic import model_validator
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+# Hosted tenants always have a USD cap: only models with known native pricing are safe.
+# Keep aligned with secretary.gemini.PRICES without importing tenant settings.
+GEMINI_METERED_MODELS = frozenset({
+    "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+})
 
 class HostingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file="hosting.env", env_file_encoding="utf-8", extra="ignore")
@@ -11,8 +20,11 @@ class HostingSettings(BaseSettings):
     # Empty = log in with the classic Login Widget (needs /setdomain on the platform bot).
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
-    # Provider for every tenant. ANTHROPIC_API_KEY set -> Claude on one shared key, spend
-    # metered in each tenant DB; otherwise one capped OpenRouter key per tenant.
+    # Shared native keys are metered locally; OpenRouter gets one capped key per tenant.
+    llm_provider: Literal["auto", "openrouter", "gemini", "anthropic"] = "auto"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_extractor_model: str = "gemini-3.1-flash-lite"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-haiku-5-5"
     openrouter_mgmt_key: str = ""
@@ -30,7 +42,28 @@ class HostingSettings(BaseSettings):
 
     @property
     def provider(self) -> str:
-        return "anthropic" if self.anthropic_api_key else "openrouter"
+        if self.llm_provider != "auto":
+            return self.llm_provider
+        if self.anthropic_api_key:
+            return "anthropic"
+        return "gemini" if self.gemini_api_key else "openrouter"
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> "HostingSettings":
+        required = {
+            "anthropic": ("ANTHROPIC_API_KEY", self.anthropic_api_key),
+            "gemini": ("GEMINI_API_KEY", self.gemini_api_key),
+            "openrouter": ("OPENROUTER_MGMT_KEY", self.openrouter_mgmt_key),
+        }
+        name, key = required[self.provider]
+        if self.llm_provider != "auto" and not key.strip():
+            raise ValueError(f"LLM_PROVIDER={self.provider} requires {name}")
+        if self.provider == "gemini":
+            for name, model in (("GEMINI_MODEL", self.gemini_model),
+                                ("GEMINI_EXTRACTOR_MODEL", self.gemini_extractor_model)):
+                if model not in GEMINI_METERED_MODELS:
+                    raise ValueError(f"{name} must be a known-priced native Gemini model for hosted credit caps")
+        return self
 
 
 settings = HostingSettings()  # type: ignore[call-arg]

@@ -375,7 +375,7 @@ async def forget_chat(*, conn_id: str, chat_id: int) -> None:
 
 async def add_usage(*, model: str, input_tokens: int, output_tokens: int,
                     cache_read_tokens: int, cache_write_tokens: int, cost_usd: float) -> None:
-    """One row per Claude call; the hosted platform bills from the sum."""
+    """One row per direct-provider call; the hosted platform bills from the sum."""
     db = _db()
     await db.execute(
         "INSERT INTO llm_usage (created_at, model, input_tokens, output_tokens, cache_read_tokens, "

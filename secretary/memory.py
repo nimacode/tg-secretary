@@ -6,14 +6,14 @@ import time
 
 from openai import AsyncOpenAI
 
-from . import claude, db
+from . import claude, db, gemini
 from .config import settings
 
 log = logging.getLogger(__name__)
 
 # Reuse OpenRouter via OpenAI SDK — separate client lets us hit a different model.
 _extractor = AsyncOpenAI(
-    api_key=settings.openrouter_api_key or "unused",  # Claude provider: this client is never called
+    api_key=settings.openrouter_api_key or "unused",  # Direct providers never call this client
     base_url="https://openrouter.ai/api/v1",
     timeout=180,
     default_headers={
@@ -54,11 +54,17 @@ No prose, no markdown fences.
 """
 
 
-async def _chat(system: str, user: str, *, max_tokens: int) -> str:
+async def _chat(system: str, user: str, *, max_tokens: int, json_output: bool = False) -> str:
     """One extractor-model turn on whichever provider is configured; returns stripped text."""
     if settings.provider == "anthropic":
         return claude.strip_fences(await claude.complete(
             system=system, messages=[{"role": "user", "content": user}], max_tokens=max_tokens + 2048))
+    if settings.provider == "gemini":
+        return claude.strip_fences(await gemini.complete(
+            system=system, messages=[{"role": "user", "content": user}],
+            model=settings.gemini_extractor_model, max_tokens=max_tokens + 2048,
+            json_output=json_output,
+        ))
     resp = await _extractor.chat.completions.create(
         model=settings.extractor_model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],  # type: ignore[arg-type]
@@ -123,7 +129,7 @@ async def _extract_for_chat(conn_id: str, chat_id: int) -> None:
     )
 
     try:
-        parsed = json.loads(await _chat(EXTRACTION_SYSTEM, prompt, max_tokens=2000))
+        parsed = json.loads(await _chat(EXTRACTION_SYSTEM, prompt, max_tokens=2000, json_output=True))
         added = 0
         for m in parsed.get("memories", [])[:5]:
             kind = m.get("kind")
@@ -212,7 +218,7 @@ async def maybe_refresh_style(conn_id: str, chat_id: int) -> None:
         if not (m["role"] == "assistant" and m["via_bot"])
     )
     try:
-        raw = await _chat(STYLE_SYSTEM, convo, max_tokens=2000)
+        raw = await _chat(STYLE_SYSTEM, convo, max_tokens=2000, json_output=True)
         json.loads(raw)  # validate
         await db.set_style_fingerprint(conn_id=conn_id, chat_id=chat_id, json_str=raw)
     except Exception:

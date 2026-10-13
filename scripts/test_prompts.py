@@ -409,6 +409,7 @@ async def run_scenario(
             history=scenario.history,
             user_message=scenario.contact_message,
             summary=scenario.summary,
+            model=settings.openrouter_model,  # This evaluation suite intentionally stays on OpenRouter.
         )
         structural_issues = structural_check(reply)
 

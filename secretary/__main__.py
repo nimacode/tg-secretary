@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import commands, handlers, memory
+from . import commands, gemini, handlers, memory
 from .config import settings
 from .dashboard.app import create_app, make_server, run_server
 from .db import close_db, init_db
@@ -140,6 +140,7 @@ async def main() -> None:
             await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        await gemini.close()
         await close_db()
 
 
