@@ -6,7 +6,7 @@
   <a href="https://www.python.org/downloads/"><img alt="Python 3.13" src="https://img.shields.io/badge/python-3.13-3776ab?logo=python&logoColor=white"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-6b52e8"></a>
   <img alt="Telegram Business" src="https://img.shields.io/badge/Telegram-Business%20chatbot-26a5e4?logo=telegram&logoColor=white">
-  <img alt="Claude Haiku 5.5 or OpenRouter" src="https://img.shields.io/badge/LLM-Claude%20Haiku%205.5%20%7C%20OpenRouter-d3a6ff">
+  <img alt="Gemini API, Claude or OpenRouter" src="https://img.shields.io/badge/LLM-Gemini%20API%20%7C%20Claude%20%7C%20OpenRouter-d3a6ff">
 </p>
 
 # tg-secretary
@@ -15,7 +15,7 @@
 
 Built for one person's account, with Persian and English in mind. It is not a customer-support bot and it never messages anyone first.
 
-> **In one line for agents and skimmers:** Python 3.13 bot (`python-telegram-bot`) + SQLite + an LLM (Claude Haiku 5.5 via the Anthropic API, or any model via OpenRouter). Single owner, per-contact personas and memory, human-in-the-loop drafts, local web dashboard, optional multi-user hosting platform in `hosting/`. Developer notes live in [CLAUDE.md](CLAUDE.md).
+> **In one line for agents and skimmers:** Python 3.13 bot (`python-telegram-bot`) + SQLite + an LLM (official Gemini or Anthropic API, or any model via OpenRouter). Single owner, per-contact personas and memory, human-in-the-loop drafts, local web dashboard, optional multi-user hosting platform in `hosting/`. Developer notes live in [CLAUDE.md](CLAUDE.md).
 
 ## Table of contents
 
@@ -51,7 +51,7 @@ You are in a meeting, asleep, or just away from the phone. Friends keep writing.
 | **Human-in-the-loop** | Approval mode drafts everything. The inner-circle gate drafts emotional, long or after-a-silence messages from partner, family and close friends. Drafts land in your bot DM with Send / Edit / Skip. |
 | **Sounds human** | Colloquial Persian spelling, language mirroring, and cleanup of machine tells such as trailing periods, markdown and translation glosses. |
 | **Private by default** | Raw message text is kept 7 days (configurable down to 1), then folded into a summary and deleted. One click deletes a chat or everything. |
-| **Voice notes** | Transcribed with Whisper on OpenRouter and answered like text. On the Claude provider voice is passed to you instead ("coming soon" in the UI). |
+| **Voice notes** | Transcribed directly by Gemini or with Whisper on OpenRouter and answered like text. On Claude, voice is passed to you instead ("coming soon" in the UI). |
 | **Web dashboard** | Settings, contacts, memory, persona editor and the approval queue, served by the bot itself on localhost. |
 | **Tested with real models** | An LLM-judged prompt suite and a local web tester for A/B/C model comparison. |
 
@@ -72,7 +72,7 @@ Voice notes are transcribed first and then take the same path. Voice notes over 
 
 ## Quick start
 
-You need Python 3.13, [uv](https://docs.astral.sh/uv/), a Telegram account (Business chatbots work without Premium since Bot API 10.0), a bot token from [@BotFather](https://t.me/BotFather), and either an Anthropic API key or an [OpenRouter](https://openrouter.ai/keys) key.
+You need Python 3.13, [uv](https://docs.astral.sh/uv/), a Telegram account (Business chatbots work without Premium since Bot API 10.0), a bot token from [@BotFather](https://t.me/BotFather), and a [Gemini](https://aistudio.google.com/apikey), Anthropic, or [OpenRouter](https://openrouter.ai/keys) API key.
 
 1. **Create the bot.** In @BotFather run `/newbot` and save the token. Then `/mybots` → your bot → **Bot Settings → Business Mode** → enable.
 2. **Install and run the wizard.**
@@ -82,7 +82,7 @@ You need Python 3.13, [uv](https://docs.astral.sh/uv/), a Telegram account (Busi
    uv sync
    uv run python -m secretary.setup
    ```
-   The wizard checks the bot token (and that Business Mode is on) and the API key, proves you own the bot with a one-time `/start` link, and writes `.env`. Re-running it is safe: Enter keeps each current value and the old `.env` is backed up. On Ubuntu, `./scripts/setup-ubuntu.sh` installs everything and runs the wizard for you.
+   The wizard lets you choose the API provider, checks the bot token (and that Business Mode is on) and the selected API key, proves you own the bot with a one-time `/start` link, and writes `.env`. Re-running it is safe: Enter keeps each current value and the old `.env` is backed up. On Ubuntu, `./scripts/setup-ubuntu.sh` installs everything and runs the wizard for you.
 3. **Start it.** `pm2 start ecosystem.config.cjs`, or `uv run python -m secretary` without pm2.
 4. **Connect your account.** In Telegram open **Settings → Business → Chatbots**, enter your bot's username, grant **reply to messages** and **read messages**, and choose which chats it may access.
 5. **Say hello.** DM `/help` to your bot for the owner commands. It tells you when the business connection is added or removed and warns about missing rights.
@@ -91,16 +91,29 @@ New chats start untagged and use the `unknown` persona. Tag people with `/who` (
 
 ## Choose a model provider
 
-| | Claude (Anthropic API) | OpenRouter |
-|---|---|---|
-| Turn on | `ANTHROPIC_API_KEY=` in `.env` | `OPENROUTER_API_KEY=` (used when no Anthropic key is set) |
-| Reply model | `ANTHROPIC_MODEL`, default `claude-haiku-5-5` | `OPENROUTER_MODEL`, default `google/gemini-3.8-flash` |
-| Memory / summaries | same model | `EXTRACTOR_MODEL`, default `google/gemini-3.1-flash-lite` |
-| Voice notes | passed to you, no transcription | `WHISPER_MODEL`, default `openai/whisper-large-v3` |
-| Cost tracking | every call recorded in the `llm_usage` table; `CREDIT_LIMIT_USD` stops replies at a cap | handled by the OpenRouter key limit |
-| Sampling | none (Haiku 5.5 rejects temperature); adaptive thinking at low effort | temperature 0.6 plus frequency/presence penalties |
+Set `LLM_PROVIDER` to `gemini`, `anthropic`, or `openrouter`. The default `auto` preserves existing Claude precedence: Anthropic key → Gemini key → OpenRouter. An explicit choice allows keeping several keys configured without changing the route. Provider/key changes need a restart; Gemini model changes in the dashboard apply live. Blank dashboard key inputs keep existing keys.
 
-Switching is a one-line `.env` change and a restart.
+| | Gemini (official Google API) | Claude (Anthropic API) | OpenRouter |
+|---|---|---|---|
+| API key | `GEMINI_API_KEY` | `ANTHROPIC_API_KEY` | `OPENROUTER_API_KEY` |
+| Reply model | `GEMINI_MODEL`, default `gemini-3.8-flash` | `ANTHROPIC_MODEL`, default `claude-haiku-5-5` | `OPENROUTER_MODEL`, default `google/gemini-3.8-flash` |
+| Memory / summaries / style | `GEMINI_EXTRACTOR_MODEL`, default `gemini-3.1-flash-lite` | same model | `EXTRACTOR_MODEL`, default `google/gemini-3.1-flash-lite` |
+| Voice notes | native OGG transcription on `GEMINI_EXTRACTOR_MODEL` | passed to you, no transcription | `WHISPER_MODEL`, default `openai/whisper-large-v3` |
+| Cost tracking | local paid-tier estimate in `llm_usage`; `CREDIT_LIMIT_USD` caps calls | `llm_usage`; `CREDIT_LIMIT_USD` stops replies at a cap | handled by the OpenRouter key limit |
+| Reply generation | low thinking (minimal for Flash-Lite), frequency/presence penalties; no deprecated temperature | no sampling parameters; low effort | temperature 0.6 plus frequency/presence penalties |
+
+For direct Gemini, add this to `.env` alongside your Telegram token and owner ID:
+
+```dotenv
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your-google-ai-studio-key
+GEMINI_MODEL=gemini-3.8-flash
+GEMINI_EXTRACTOR_MODEL=gemini-3.1-flash-lite
+```
+
+No OpenRouter key is needed. Native Gemini IDs have no `google/` prefix. Calls use Google's [generateContent API](https://ai.google.dev/gemini-api/docs/generate-content/text-generation), with the key in a header, not a logged URL. API failures are not silently routed to another provider.
+
+Gemini cost estimates use [standard paid-tier prices](https://ai.google.dev/gemini-api/docs/pricing), including thinking, cached input and audio tokens; they are not a lookup of Google's billing balance or free-tier usage. Metered models are `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite`. Flash introductory prices switch to the published standard rate on January 1, 2027. Other native models can run standalone without a cap, but USD accounting is unavailable and the credit panel is hidden; hosted/capped configurations reject unpriced models before a paid call.
 
 ## Dashboard
 
@@ -168,21 +181,22 @@ Send these to the bot in a direct message. Only `OWNER_USER_ID` can use them.
 
 ## Hosted platform
 
-`hosting/` is a multi-user control plane: a Persian website where people sign in with Telegram, accept the terms, describe themselves, pay, and connect one shared platform bot. Each user gets their own secretary process (pm2 `tgs-<id>`, own `.env`, database and prompts) and reaches their dashboard under `/app`. The platform meters Claude spend per user and stops the secretary at the paid cap. See [hosting/README.md](hosting/README.md).
+`hosting/` is a multi-user control plane: a Persian website where people sign in with Telegram, accept the terms, describe themselves, pay, and connect one shared platform bot. Each user gets their own secretary process (pm2 `tgs-<id>`, own `.env`, database and prompts) and reaches their dashboard under `/app`. The platform meters Gemini/Claude spend per user against the paid cap, or provisions capped OpenRouter keys. See [hosting/README.md](hosting/README.md).
 
 ## Project map
 
 ```
 secretary/            the bot (single owner)
 ├── __main__.py       entrypoint: handlers, memory worker, dashboard server
-├── config.py         pydantic-settings; ANTHROPIC_API_KEY picks the provider
+├── config.py         pydantic-settings; explicit or automatic provider selection
 ├── handlers.py       inbound routing, race guards, delays, HITL fork, credit guard
-├── llm.py            reply generation and output cleanup (both providers)
+├── llm.py            reply generation and output cleanup (all providers)
 ├── claude.py         Anthropic calls with per-call usage accounting
+├── gemini.py         official Gemini calls, OGG input and paid-tier usage accounting
 ├── memory.py         extraction worker, style fingerprint, summary rollups, retention sweep
 ├── prompts.py        persona stack assembly (defaults → about_me → persona → contact → note → memory → style)
 ├── innercircle.py    emotional keyword / length / silence gate
-├── voice.py          Whisper transcription (OpenRouter)
+├── voice.py          Gemini or OpenRouter Whisper transcription
 ├── db.py             one aiosqlite connection, WAL, all queries
 ├── commands.py       owner-only / commands
 ├── setup.py          first-run wizard
@@ -201,7 +215,8 @@ Storage is one SQLite file per secretary: `connections`, `messages`, `chat_summa
 There is no pytest suite. Offline smoke checks cover the pipeline, dashboard and hosting logic; prompts are tested with real model calls graded by an LLM judge.
 
 ```bash
-uv run python scripts/smoke_core.py                              # pipeline logic, retention, Claude accounting (offline)
+uv run python scripts/smoke_core.py                              # pipeline, retention, native accounting and safety (offline)
+uv run python scripts/smoke_setup.py                             # setup/provider validation (offline)
 PYTHONIOENCODING=utf-8 uv run python scripts/smoke_dashboard.py  # dashboard routes and DB helpers (offline)
 PYTHONIOENCODING=utf-8 uv run python scripts/smoke_hosting.py    # hosting platform (offline)
 uv run python scripts/test_prompts.py --no-judge                 # prompt assembly + real reply + structural checks
@@ -209,6 +224,8 @@ uv run python scripts/test_prompts.py                            # adds judge gr
 ```
 
 Scenarios live in `tests/fixtures/scenarios/`, rubrics in `tests/fixtures/rubrics/`, snapshots in `tests/snapshots/`. `scripts/dump_fixtures.py` turns your own `secretary.db` into scenarios, anonymized by default; `--no-anonymize` writes gitignored `raw_*.json` files that still go to the model API when you run the suite.
+
+The prompt suite and web tester deliberately stay on OpenRouter even when the bot uses a direct provider; their model comparisons require `OPENROUTER_API_KEY`.
 
 Web tester for replaying a real chat against up to three models side by side:
 
@@ -232,7 +249,7 @@ pm2 save
 
 Read this before connecting the bot to real chats.
 
-- **Contact messages go to a model provider.** Message text, chat history, memory and transcribed voice notes are sent to Anthropic or to OpenRouter and the providers behind it. The [Telegram Bot Developer Terms](https://telegram.org/tos/bot-developers) (§5.4(iv)) require the user's authorization before business message contents are shared with third-party APIs. Make sure you have it, and pick providers whose data policies you accept.
+- **Contact messages go to a model provider.** Message text, chat history, memory and voice audio (when transcription is enabled) are sent to the configured Gemini or Anthropic API, or to OpenRouter and its providers. The [Telegram Bot Developer Terms](https://telegram.org/tos/bot-developers) (§5.4(iv)) require the user's authorization before business message contents are shared with third-party APIs. Make sure you have it, and pick providers whose data policies you accept. Google's [Gemini free tier](https://ai.google.dev/gemini-api/docs/pricing) may use submitted content to improve its products; use the paid tier for private conversations.
 - **Raw messages are short-lived.** Text is kept `MESSAGE_RETENTION_DAYS` (default 7; `/retention` or the dashboard changes it live). Hourly, older rows are folded into the per-chat summary and deleted; memory facts, summaries and contact rows stay. `0` keeps everything. The dashboard deletes one chat or every chat on demand.
 - **The database is plaintext.** `secretary.db` is unencrypted. The Bot Developer Terms (§4.4(a)) ask for encryption at rest, so run on an encrypted disk (LUKS, BitLocker, FileVault) and restrict host access.
 - **Whoever runs the host can read the data.** No at-rest encryption changes that for an autoresponder: the process needs plaintext to reply while you are away. If you don't want a hosted operator in that position, run it yourself.

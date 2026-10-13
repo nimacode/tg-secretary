@@ -1,5 +1,7 @@
 from pathlib import Path
+from typing import Literal, Self
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,12 +9,16 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     tg_bot_token: str
-    # Provider: ANTHROPIC_API_KEY set -> Claude (replies, memory, summaries) and no voice
-    # transcription; otherwise OpenRouter with the models below.
+    # Auto preserves Claude precedence, then prefers a direct Gemini key over OpenRouter.
+    # An explicit provider lets both keys stay configured without changing the route.
+    llm_provider: Literal["auto", "openrouter", "gemini", "anthropic"] = "auto"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-haiku-5-5"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_extractor_model: str = "gemini-3.1-flash-lite"
     # Hosted: the platform writes the paid balance here; 0 = no limit. The bot stops replying
-    # once recorded Claude spend reaches it.
+    # once recorded direct-provider spend reaches it.
     credit_limit_usd: float = 0.0
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-3.8-flash"
@@ -61,13 +67,25 @@ class Settings(BaseSettings):
     dashboard_root_path: str = ""
     dashboard_lang: str = "en"
 
+    @model_validator(mode="after")
+    def require_selected_key(self) -> Self:
+        if self.llm_provider != "auto" and not getattr(self, f"{self.llm_provider}_api_key").strip():
+            raise ValueError(f"{self.llm_provider.upper()}_API_KEY is required for LLM_PROVIDER={self.llm_provider}")
+        return self
+
     @property
     def provider(self) -> str:
-        return "anthropic" if self.anthropic_api_key else "openrouter"
+        if self.llm_provider != "auto":
+            return self.llm_provider
+        if self.anthropic_api_key:
+            return "anthropic"
+        return "gemini" if self.gemini_api_key else "openrouter"
 
     @property
     def reply_model(self) -> str:
-        return self.anthropic_model if self.provider == "anthropic" else self.openrouter_model
+        if self.provider == "anthropic":
+            return self.anthropic_model
+        return self.gemini_model if self.provider == "gemini" else self.openrouter_model
 
 
 settings = Settings()  # type: ignore[call-arg]

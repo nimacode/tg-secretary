@@ -1,4 +1,4 @@
-"""Offline checks for the hosting control plane. No Telegram, OpenRouter or pm2.
+"""Offline checks for the hosting control plane. No Telegram, model-provider or pm2 calls.
 
     PYTHONIOENCODING=utf-8 uv run python scripts/smoke_hosting.py
 """
@@ -16,6 +16,9 @@ os.environ.update(
     PLATFORM_BOT_TOKEN="1:platform", PLATFORM_BOT_USERNAME="plat_bot",
     OIDC_CLIENT_ID="cid", OIDC_CLIENT_SECRET="csecret",
     OPENROUTER_MGMT_KEY="sk-or-mgmt", PUBLIC_URL="https://host.test", ADMIN_TG_ID="1",
+    LLM_PROVIDER="openrouter", ANTHROPIC_API_KEY="", GEMINI_API_KEY="",
+    ANTHROPIC_MODEL="claude-haiku-5-5", GEMINI_MODEL="gemini-3.8-flash",
+    GEMINI_EXTRACTOR_MODEL="gemini-3.1-flash-lite",
     DB_PATH=str(_tmp / "hosting.db"), TENANTS_ROOT=str(_tmp / "tenants"),
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx  # noqa: E402
 
 from hosting import db, oidc, openrouter, pm2, tenants, tg  # noqa: E402
-from hosting.config import settings  # noqa: E402
+from hosting.config import HostingSettings, settings  # noqa: E402
 
 CHECKS = []
 
@@ -31,6 +34,41 @@ CHECKS = []
 def check(fn):
     CHECKS.append(fn)
     return fn
+
+
+@check
+async def check_provider_settings() -> None:
+    base = {
+        "platform_bot_token": "1:test", "platform_bot_username": "test",
+        "public_url": "https://host.test", "admin_tg_id": 1,
+        "llm_provider": "auto", "anthropic_api_key": "", "gemini_api_key": "",
+        "openrouter_mgmt_key": "", "gemini_model": "gemini-3.8-flash",
+        "gemini_extractor_model": "gemini-3.1-flash-lite",
+    }
+
+    def config(**overrides):
+        return HostingSettings(_env_file=None, **{**base, **overrides})
+
+    assert config().provider == "openrouter"
+    assert config(gemini_api_key="g").provider == "gemini"
+    assert config(anthropic_api_key="a", gemini_api_key="g").provider == "anthropic"
+    for provider, key in (("openrouter", "openrouter_mgmt_key"),
+                          ("anthropic", "anthropic_api_key"), ("gemini", "gemini_api_key")):
+        assert config(llm_provider=provider, **{key: "key"},
+                      **({"gemini_api_key": "stale-g"} if provider != "gemini" else
+                         {"anthropic_api_key": "stale-a"})).provider == provider
+        try:
+            config(llm_provider=provider)
+            raise AssertionError("an explicit provider requires its own key")
+        except ValueError:
+            pass
+    for field in ("gemini_model", "gemini_extractor_model"):
+        for model in ("unknown-paid-model", "google/gemini-3.8-flash"):
+            try:
+                config(llm_provider="gemini", gemini_api_key="g", **{field: model})
+                raise AssertionError("hosted Gemini must reject unpriced or OpenRouter models")
+            except ValueError:
+                pass
 
 
 @check
@@ -872,6 +910,9 @@ async def check_minor_fixes() -> None:
     pm2.status()
     env = seen["env"]
     assert "OPENROUTER_MGMT_KEY" not in env and "DB_PATH" not in env and "PLATFORM_BOT_TOKEN" not in env
+    for key in ("LLM_PROVIDER", "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_EXTRACTOR_MODEL",
+                "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"):
+        assert key not in env, key
     assert "PATH" in env or "Path" in env
     pm2.RUN = fake_run
 
@@ -929,36 +970,144 @@ async def check_login_widget() -> None:
 
 
 @check
-async def check_claude_credit() -> None:
-    """ANTHROPIC_API_KEY set: shared key + CREDIT_LIMIT_USD in the tenant .env, no OpenRouter
-    key, credit = payments minus spend read from the tenant DB, restart on top-up."""
+async def check_native_credit() -> None:
+    """Native providers: activation retry, absolute caps, local spend, isolated credit and alerts."""
     import sqlite3
-    pm2.RUN = fake_run
-    settings.anthropic_api_key = "sk-ant-x"
+    import subprocess
+    from dotenv import dotenv_values
+
+    old = {name: getattr(settings, name) for name in
+           ("llm_provider", "anthropic_api_key", "gemini_api_key", "openrouter_mgmt_key")}
+    previous_run, previous_or, previous_tg = pm2.RUN, openrouter.TRANSPORT, tg.TRANSPORT
+
+    def no_openrouter(req):
+        raise AssertionError("native tenants must not call OpenRouter")
+
+    openrouter.TRANSPORT = httpx.MockTransport(no_openrouter)
     try:
-        tid = await db.create_tenant(777)
-        await db.update_tenant(tid, profile_done=1, status="awaiting_credit")
-        await tenants.top_up(tid, 5.0, "", "", 1, "c-1")
-        env = (tenants.tenant_dir(tid) / ".env").read_text(encoding="utf-8")
-        assert "ANTHROPIC_API_KEY='sk-ant-x'" in env and "CREDIT_LIMIT_USD='5.0000'" in env, env
-        assert "OPENROUTER" not in env
-        t = await db.get_tenant(tid)
-        assert t["status"] == "running" and not t["or_key_hash"]
-        assert await tenants.credit(t) == {"limit": 5.0, "usage": 0.0, "limit_remaining": 5.0}
-        con = sqlite3.connect(tenants.tenant_dir(tid) / "secretary.db")
-        con.execute("CREATE TABLE llm_usage (id INTEGER PRIMARY KEY, created_at INTEGER, model TEXT, "
-                    "input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, "
-                    "cache_write_tokens INTEGER, cost_usd REAL)")
-        con.execute("INSERT INTO llm_usage VALUES (1, 0, 'claude-haiku-5-5', 1, 1, 0, 0, 1.25)")
-        con.commit()
-        con.close()
-        assert abs((await tenants.credit(t))["limit_remaining"] - 3.75) < 1e-9
-        n = len(PM2_CALLS)
-        await tenants.top_up(tid, 1.0, "", "", 1, "c-2")  # running tenant restarts to read the new cap
-        assert ["restart", pm2.name(tid)] in [list(x) for x in PM2_CALLS[n:]], PM2_CALLS[n:]
-        assert "CREDIT_LIMIT_USD='6.0000'" in (tenants.tenant_dir(tid) / ".env").read_text(encoding="utf-8")
+        for provider, owner in (("anthropic", 777), ("gemini", 778)):
+            settings.llm_provider = provider
+            settings.anthropic_api_key = "sk-ant-native" if provider == "anthropic" else ""
+            settings.gemini_api_key = "gemini-native" if provider == "gemini" else ""
+            settings.openrouter_mgmt_key = ""
+            await db.upsert_user(owner, "Native", None)
+            await db.add_consent(owner, settings.consent_version)
+            tid = await db.create_tenant(owner)
+            await tenants.save_profile(tid, "Native", "native owner", "", "")
+            await db.update_tenant(tid, status="awaiting_credit")
+            tenants.write_env(tid, {"OPENROUTER_API_KEY": "stale-or", "REPLY_DELAY_SECONDS": "17"})
+            pm2.RUN = lambda args, **kw: subprocess.CompletedProcess(args, 1, stdout="", stderr="offline")
+            try:
+                await tenants.top_up(tid, 5.0, "", "", 1, f"native-{provider}-1")
+                raise AssertionError("activation failure must propagate")
+            except pm2.Pm2Error:
+                pass
+            assert (await db.get_payment(f"native-{provider}-1"))["applied"] == 1
+            pm2.RUN = fake_run
+            assert await tenants.top_up(tid, 5.0, "", "", 1, f"native-{provider}-1") is False
+            env = dotenv_values(tenants.tenant_dir(tid) / ".env")
+            assert env["LLM_PROVIDER"] == provider and env["CREDIT_LIMIT_USD"] == "5.0000"
+            assert env["REPLY_DELAY_SECONDS"] == "17" and "OPENROUTER_API_KEY" not in env
+            if provider == "gemini":
+                assert "ANTHROPIC_API_KEY" not in env
+            t = await db.get_tenant(tid)
+            assert t["status"] == "running" and not t["or_key_hash"]
+            assert await tenants.credit(t) == {"limit": 5.0, "usage": 0.0, "limit_remaining": 5.0}
+            with sqlite3.connect(tenants.tenant_dir(tid) / "secretary.db") as con:
+                con.execute("CREATE TABLE llm_usage (cost_usd REAL)")
+                con.executemany("INSERT INTO llm_usage VALUES (?)", [(1.25,), (3.0,)])
+            assert await tenants.credit(t) == {"limit": 5.0, "usage": 4.25, "limit_remaining": 0.75}
+
+            other = await db.create_tenant(owner + 1000)
+            await tenants.ensure_key(other)
+            assert await tenants.credit(await db.get_tenant(other)) == {
+                "limit": 0.0, "usage": 0.0, "limit_remaining": 0.0,
+            }
+            assert dotenv_values(tenants.tenant_dir(other) / ".env")["CREDIT_LIMIT_USD"] == "0.0000"
+            async with web(happ.create_app(), await db.create_session(owner)) as c:
+                assert (await c.get("/account")).status_code == 200
+            sent = []
+            tg.TRANSPORT = httpx.MockTransport(lambda req: (
+                sent.append((req.url.path.rsplit("/", 1)[1], json.loads(req.content or b"{}"))),
+                httpx.Response(200, json={"ok": True, "result": True}))[1])
+            await pbot.check_credit_once()
+            await pbot.check_credit_once()
+            assert sum(method == "sendMessage" and body.get("chat_id") == owner
+                       for method, body in sent) == 1
+            assert (await db.get_tenant(tid))["warned_at_limit"] == 5.0
+            n = len(PM2_CALLS)
+            assert await tenants.top_up(tid, 1.0, "", "", 1, f"native-{provider}-2") is True
+            assert ["restart", pm2.name(tid)] in PM2_CALLS[n:]
+            n = len(PM2_CALLS)
+            assert await tenants.top_up(tid, 1.0, "", "", 1, f"native-{provider}-2") is False
+            assert len(PM2_CALLS) == n
+            assert dotenv_values(tenants.tenant_dir(tid) / ".env")["CREDIT_LIMIT_USD"] == "6.0000"
+            assert await tenants.credit(await db.get_tenant(tid)) == {
+                "limit": 6.0, "usage": 4.25, "limit_remaining": 1.75,
+            }
+            assert (await db.get_tenant(tid))["warned_at_limit"] is None
     finally:
-        settings.anthropic_api_key = ""
+        for name, value in old.items():
+            setattr(settings, name, value)
+        pm2.RUN, openrouter.TRANSPORT, tg.TRANSPORT = previous_run, previous_or, previous_tg
+
+
+@check
+async def check_provider_cutover() -> None:
+    """Explicit selection removes stale credentials while keeping unrelated tenant settings."""
+    from dotenv import dotenv_values
+    old = {name: getattr(settings, name) for name in
+           ("llm_provider", "anthropic_api_key", "gemini_api_key", "openrouter_mgmt_key")}
+    previous = openrouter.TRANSPORT
+    calls = []
+    issued = []
+
+    def or_handler(req):
+        body = json.loads(req.content or b"{}")
+        calls.append((req.method, body))
+        if req.method == "POST":
+            issued.append(f"key-{len(issued) + 1}")
+            return httpx.Response(200, json={"key": issued[-1], "data": {"hash": f"hash-{len(issued)}"}})
+        return httpx.Response(200, json={"data": {}})
+
+    def no_openrouter(req):
+        raise AssertionError("native cutover must not call OpenRouter")
+
+    try:
+        await db.upsert_user(779, "Switch", None)
+        tid = await db.create_tenant(779)
+        settings.llm_provider = "openrouter"
+        settings.openrouter_mgmt_key = "management"
+        settings.anthropic_api_key, settings.gemini_api_key = "stale-ant", "stale-gemini"
+        tenants.write_env(tid, {"ANTHROPIC_API_KEY": "tenant-ant", "GEMINI_API_KEY": "tenant-g",
+                                "CREDIT_LIMIT_USD": "99", "REPLY_DELAY_SECONDS": "23"})
+        openrouter.TRANSPORT = httpx.MockTransport(or_handler)
+        assert await tenants.ensure_key(tid) == "hash-1"
+        env = dotenv_values(tenants.tenant_dir(tid) / ".env")
+        assert env["LLM_PROVIDER"] == "openrouter" and env["OPENROUTER_API_KEY"] == "key-1"
+        assert not {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "CREDIT_LIMIT_USD"} & env.keys()
+        assert await tenants.ensure_key(tid) == "hash-1" and len(issued) == 1
+        openrouter.TRANSPORT = httpx.MockTransport(no_openrouter)
+        for provider in ("gemini", "anthropic"):
+            settings.llm_provider = provider
+            assert await tenants.ensure_key(tid) == ""
+            env = dotenv_values(tenants.tenant_dir(tid) / ".env")
+            assert env["LLM_PROVIDER"] == provider and env["REPLY_DELAY_SECONDS"] == "23"
+            assert "OPENROUTER_API_KEY" not in env and env["CREDIT_LIMIT_USD"] == "0.0000"
+            other_key = "ANTHROPIC_API_KEY" if provider == "gemini" else "GEMINI_API_KEY"
+            assert other_key not in env
+        settings.llm_provider = "openrouter"
+        openrouter.TRANSPORT = httpx.MockTransport(or_handler)
+        assert await tenants.ensure_key(tid) == "hash-2"
+        assert ("PATCH", {"disabled": True}) in calls
+        env = dotenv_values(tenants.tenant_dir(tid) / ".env")
+        assert env["LLM_PROVIDER"] == "openrouter" and env["OPENROUTER_API_KEY"] == "key-2"
+        assert env["REPLY_DELAY_SECONDS"] == "23"
+        assert not {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "CREDIT_LIMIT_USD"} & env.keys()
+    finally:
+        for name, value in old.items():
+            setattr(settings, name, value)
+        openrouter.TRANSPORT = previous
 
 
 async def main() -> None:

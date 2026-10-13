@@ -149,6 +149,12 @@
     <h3 class="sec">{{ "Models"|t }}</h3>
     {% if provider == "anthropic" %}
     <div class="setting"><span><b>{{ "Reply model"|t }}</b><small><code>{{ s.anthropic_model }}</code></small></span></div>
+    {% elif provider == "gemini" %}
+    <p class="muted" style="margin:0"><small>{{ "Native model ids. Saved to .env (the old one is backed up)."|t }}</small></p>
+    <div class="setting"><label for="GEMINI_MODEL"><b>{{ "Reply model"|t }}</b></label>
+      <input id="GEMINI_MODEL" name="GEMINI_MODEL" value="{{ s.gemini_model }}" list="models" dir="ltr" required></div>
+    <div class="setting"><label for="GEMINI_EXTRACTOR_MODEL"><b>{{ "Extractor and voice model"|t }}</b></label>
+      <input id="GEMINI_EXTRACTOR_MODEL" name="GEMINI_EXTRACTOR_MODEL" value="{{ s.gemini_extractor_model }}" list="models" dir="ltr" required></div>
     {% else %}
     <p class="muted" style="margin:0"><small>{{ "OpenRouter model ids. Saved to .env (the old one is backed up)."|t }}</small></p>
     <div class="setting"><label for="OPENROUTER_MODEL"><b>{{ "Reply model"|t }}</b></label>
@@ -163,10 +169,20 @@
     {% if not hosted %}
     <h3 class="sec">{{ "Needs a restart"|t }}</h3>
     <p class="muted" style="margin:0"><small>{{ "These take effect after a restart."|t }}</small></p>
+    <div class="setting"><label for="LLM_PROVIDER"><b>{{ "AI provider"|t }}</b></label>
+      <select id="LLM_PROVIDER" name="LLM_PROVIDER">
+        {% for value, label in [("auto", "Automatic"), ("openrouter", "OpenRouter"), ("gemini", "Gemini"), ("anthropic", "Anthropic")] %}
+        <option value="{{ value }}" {% if s.llm_provider == value %}selected{% endif %}>{{ label|t }}</option>
+        {% endfor %}
+      </select></div>
     <div class="setting"><label for="TG_BOT_TOKEN"><b>{{ "Telegram bot token"|t }}</b></label>
       <input type="password" id="TG_BOT_TOKEN" name="TG_BOT_TOKEN" placeholder="{{ s.tg_bot_token|mask }} ({{ 'blank keeps it'|t }})" autocomplete="off" dir="ltr"></div>
     <div class="setting"><label for="OPENROUTER_API_KEY"><b>{{ "OpenRouter API key"|t }}</b></label>
       <input type="password" id="OPENROUTER_API_KEY" name="OPENROUTER_API_KEY" placeholder="{{ s.openrouter_api_key|mask }} ({{ 'blank keeps it'|t }})" autocomplete="off" dir="ltr"></div>
+    <div class="setting"><label for="GEMINI_API_KEY"><b>{{ "Gemini API key"|t }}</b></label>
+      <input type="password" id="GEMINI_API_KEY" name="GEMINI_API_KEY" placeholder="{{ s.gemini_api_key|mask }} ({{ 'blank keeps it'|t }})" autocomplete="off" dir="ltr"></div>
+    <div class="setting"><label for="ANTHROPIC_API_KEY"><b>{{ "Anthropic API key"|t }}</b></label>
+      <input type="password" id="ANTHROPIC_API_KEY" name="ANTHROPIC_API_KEY" placeholder="{{ s.anthropic_api_key|mask }} ({{ 'blank keeps it'|t }})" autocomplete="off" dir="ltr"></div>
     <div class="setting"><label for="OWNER_USER_ID"><b>{{ "Owner user id"|t }}</b></label>
       <input id="OWNER_USER_ID" name="OWNER_USER_ID" value="{{ s.owner_user_id }}" inputmode="numeric" dir="ltr" required></div>
     {% endif %}

@@ -1,4 +1,4 @@
-"""Tenant lifecycle: files on disk, OpenRouter key, pm2 process."""
+"""Tenant lifecycle: files on disk, provider credentials, credit cap, pm2 process."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from dotenv import set_key
+from dotenv import dotenv_values, set_key, unset_key
 
 from . import db, openrouter, pm2
 from .config import settings
@@ -41,6 +41,20 @@ def write_env(tid: int, values: dict[str, str]) -> None:
         env.chmod(0o600)
     for k, v in values.items():
         set_key(env, k, v)  # quotes values, so names with spaces or '#' are safe
+
+
+def _write_provider_env(tid: int, values: dict[str, str]) -> None:
+    """An explicit provider cutover keeps unrelated tenant settings, not stale credentials."""
+    write_env(tid, values)
+    env = tenant_dir(tid) / ".env"
+    provider_keys = (
+        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
+        "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_EXTRACTOR_MODEL", "CREDIT_LIMIT_USD",
+    )
+    current = dotenv_values(env)
+    for key in provider_keys:
+        if key not in values and key in current:
+            unset_key(env, key)
 
 
 NEVER_KEYS = ("promise", "meet", "money", "private")
@@ -94,29 +108,41 @@ async def save_profile(tid: int, first_name: str, about: str, style: str, never:
 
 
 async def ensure_key(tid: int) -> str:
-    """Give the tenant its model credentials once. OpenRouter: a zero-limit key per tenant
-    (returns its hash). Claude: the shared platform key in the tenant .env (returns "")."""
+    """Write explicit provider credentials; native providers share a locally capped key.
+    Return the OpenRouter key hash, or "" for a native provider."""
     t = await db.get_tenant(tid)
     if t is None:
         raise ValueError(f"no tenant {tid}")
-    if settings.provider == "anthropic":
-        write_env(tid, {"ANTHROPIC_API_KEY": settings.anthropic_api_key, "ANTHROPIC_MODEL": settings.anthropic_model})
+    provider = settings.provider
+    if provider in {"anthropic", "gemini"}:
+        values = {"LLM_PROVIDER": provider, "CREDIT_LIMIT_USD": f"{await db.payments_total(tid):.4f}"}
+        if provider == "anthropic":
+            values.update(ANTHROPIC_API_KEY=settings.anthropic_api_key, ANTHROPIC_MODEL=settings.anthropic_model)
+        else:
+            values.update(GEMINI_API_KEY=settings.gemini_api_key, GEMINI_MODEL=settings.gemini_model,
+                          GEMINI_EXTRACTOR_MODEL=settings.gemini_extractor_model)
+        _write_provider_env(tid, values)
         return ""
-    if t["or_key_hash"]:
+    env = dotenv_values(tenant_dir(tid) / ".env")
+    key = env.get("OPENROUTER_API_KEY")
+    if t["or_key_hash"] and key:
+        _write_provider_env(tid, {"LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": key})
         return t["or_key_hash"]
+    if t["or_key_hash"]:
+        # Native cutover removed the one-time plaintext key: retire it before minting a replacement.
+        await openrouter.disable_key(t["or_key_hash"])
     key, key_hash = await openrouter.create_key(pm2.name(tid), 0.0)
-    write_env(tid, {"OPENROUTER_API_KEY": key})  # shown once: persist before anything else
+    _write_provider_env(tid, {"LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": key})
     await db.update_tenant(tid, or_key_hash=key_hash)
     return key_hash
 
 
 async def sync_limit(tid: int) -> None:
     """Set the credit cap to the absolute sum of the tenant's payments; safe to repeat.
-    Claude: the cap lives in the tenant .env, so a running tenant restarts to read it."""
+    Native providers: the cap lives in the tenant .env, so running tenants restart to read it."""
     h = await ensure_key(tid)
     total = await db.payments_total(tid)
-    if settings.provider == "anthropic":
-        write_env(tid, {"CREDIT_LIMIT_USD": f"{total:.4f}"})
+    if settings.provider in {"anthropic", "gemini"}:
         t = await db.get_tenant(tid)
         if t and t["status"] == "running":
             await asyncio.to_thread(pm2.restart, tid)
@@ -126,7 +152,7 @@ async def sync_limit(tid: int) -> None:
 
 
 def _spend(path: Path) -> float:
-    """Recorded Claude spend in a tenant DB (read-only); 0 before the bot created its tables."""
+    """Recorded native-provider spend (read-only); 0 before the bot created its tables."""
     if not path.exists():
         return 0.0
     con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
@@ -142,7 +168,7 @@ def _spend(path: Path) -> float:
 async def credit(t: dict) -> dict | None:
     """{limit, usage, limit_remaining} for a tenant row, or None when unknown.
     Same shape as OpenRouter's key info so the pages and the alert loop don't care."""
-    if settings.provider == "anthropic":
+    if settings.provider in {"anthropic", "gemini"}:
         limit = await db.payments_total(t["id"])
         used = await asyncio.to_thread(_spend, tenant_dir(t["id"]) / "secretary.db")
         return {"limit": limit, "usage": used, "limit_remaining": limit - used}

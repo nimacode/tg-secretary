@@ -2,7 +2,7 @@
 
     uv run python -m secretary.setup
 
-Validates the Telegram bot token (getMe), the OpenRouter key (/api/v1/key) and
+Validates the Telegram bot token (getMe) and the selected provider key, and
 proves who owns the bot with a one-time /start code, then writes .env. Safe to
 re-run: current values are offered as defaults and the old .env is backed up.
 
@@ -29,6 +29,9 @@ ENV_PATH = Path(".env")
 EXAMPLE_PATH = Path(".env.example")
 TG_API = "https://api.telegram.org"
 OR_API = "https://openrouter.ai/api/v1"
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+PROVIDERS = ("auto", "openrouter", "gemini", "anthropic")
+PROVIDER_KEY = {"openrouter": "OPENROUTER_API_KEY", "gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 DEFAULT_MODEL = "google/gemini-3.8-flash"
 TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
@@ -57,6 +60,19 @@ def real_value(value: str | None) -> str:
     """Treat .env.example placeholders as unset."""
     v = (value or "").strip()
     return "" if v.startswith(_PLACEHOLDERS) or v in _PLACEHOLDER_VALUES else v
+
+
+def selected_provider(selection: str, values: Mapping[str, str]) -> str:
+    """Resolve a proposed config without importing Settings or exposing secrets."""
+    if selection not in PROVIDERS:
+        raise SetupError("Unknown AI provider.")
+    provider = selection
+    if provider == "auto":
+        provider = next((p for p in ("anthropic", "gemini", "openrouter")
+                         if real_value(values.get(PROVIDER_KEY[p]))), "openrouter")
+    if not real_value(values.get(PROVIDER_KEY[provider])):
+        raise SetupError(f"{PROVIDER_KEY[provider]} is required for the selected provider.")
+    return provider
 
 
 def new_code() -> str:
@@ -153,6 +169,41 @@ def or_model_ids() -> set[str] | None:
         return None
 
 
+def gemini_model_ids(key: str, timeout: float = 20) -> set[str]:
+    """Validate a Gemini key and collect every native generateContent model ID."""
+    ids: set[str] = set()
+    page = ""
+    seen: set[str] = set()
+    while True:
+        r = httpx.get(
+            f"{GEMINI_API}/models", headers={"x-goog-api-key": key},
+            params={"pageToken": page} if page else {}, timeout=timeout,
+        )
+        if r.status_code != 200:
+            raise SetupError(f"Gemini rejected the model catalogue request (HTTP {r.status_code}).")
+        body = _json(r, "Gemini")
+        for model in body.get("models", []):
+            if "generateContent" in model.get("supportedGenerationMethods", []):
+                name = model.get("name", "")
+                if name.startswith("models/"):
+                    ids.add(name.removeprefix("models/"))
+        page = body.get("nextPageToken", "")
+        if not page:
+            return ids
+        if page in seen:
+            raise SetupError("Gemini returned a repeated catalogue page.")
+        seen.add(page)
+
+
+def anthropic_key_info(key: str) -> None:
+    """Check an Anthropic key without generating a paid response."""
+    r = httpx.get("https://api.anthropic.com/v1/models",
+                  headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                  params={"limit": 1}, timeout=15)
+    if r.status_code != 200:
+        raise SetupError(f"Anthropic rejected this key (HTTP {r.status_code}).")
+
+
 def tg_get_updates(token: str, offset: int, timeout: int) -> list[dict[str, Any]]:
     r = httpx.get(
         f"{TG_API}/bot{token}/getUpdates",
@@ -197,7 +248,7 @@ def wait_for_owner(token: str, code: str, seconds: int = OWNER_WAIT_SECONDS) -> 
 
 # ----- interactive wizard -----
 
-SECRET_KEYS = {"TG_BOT_TOKEN", "OPENROUTER_API_KEY"}
+SECRET_KEYS = {"TG_BOT_TOKEN", *PROVIDER_KEY.values()}
 BUSINESS_HELP = """  ! Business Mode is off for this bot. Turn it on:
     @BotFather → /mybots → <your bot> → Bot Settings → Business Mode → Turn on"""
 NEXT_STEPS = """
@@ -267,16 +318,19 @@ def step_token(current: str) -> tuple[str, dict[str, Any] | None]:
         return token, me
 
 
-def step_key(current: str) -> str:
+def step_key(current: str, provider: str = "openrouter") -> str:
+    check = {"openrouter": or_key_info, "gemini": gemini_model_ids, "anthropic": anthropic_key_info}[provider]
+    host = {"openrouter": "openrouter.ai", "gemini": "generativelanguage.googleapis.com",
+            "anthropic": "api.anthropic.com"}[provider]
     while True:
-        key = ask("API key", current, secret=True)
+        key = ask(f"{provider} API key", current, secret=True)
         try:
-            info = _net("openrouter.ai", or_key_info, key)
+            info = _net(host, check, key)
         except SetupError as e:
             print(f"  ! {e}")
             current = ""
             continue
-        if info is not None:
+        if provider == "openrouter" and info is not None:
             left = info.get("limit_remaining")
             print(f"  ✓ key works ({'no credit limit' if left is None else f'${left:.2f} left'})")
         return key
@@ -315,13 +369,18 @@ def step_owner(token: str, me: dict[str, Any] | None, current: str) -> tuple[int
     return int(owner["id"]), owner.get("first_name", "")
 
 
-def step_model(current: str) -> str:
-    ids = or_model_ids()
+def step_model(current: str, provider: str = "openrouter", key: str = "", label: str = "Reply model") -> str:
+    if provider == "anthropic":
+        return current  # preserve the existing fixed Claude model
+    ids = (_net("generativelanguage.googleapis.com", gemini_model_ids, key)
+           if provider == "gemini" else or_model_ids())
     if ids is None:
         print("  ! couldn't fetch the model list — not checking the id")
     while True:
-        model = ask("Reply model (any id from https://openrouter.ai/models)", current)
-        if ids is None or model in ids:
+        model = ask(f"{label} (native Gemini id)" if provider == "gemini"
+                    else f"{label} (any id from https://openrouter.ai/models)", current)
+        native_id = provider != "gemini" or (model.startswith("gemini-") and "/" not in model)
+        if native_id and (ids is None or model in ids):
             return model
         print("  ! unknown model id")
         current = ""
@@ -361,20 +420,42 @@ def main() -> int:
     try:
         print("\n[1/4] Telegram bot token — @BotFather → /newbot")
         token, me = step_token(cur.get("TG_BOT_TOKEN", ""))
-        print("\n[2/4] OpenRouter API key — https://openrouter.ai/keys")
-        key = step_key(cur.get("OPENROUTER_API_KEY", ""))
+        print("\n[2/4] AI provider and API key")
+        selection = cur.get("LLM_PROVIDER") or "auto"
+        while True:
+            selection = ask("Provider (auto / openrouter / gemini / anthropic)", selection)
+            if selection in PROVIDERS:
+                break
+            print("  ! unknown provider")
+            selection = ""
+        provider = selection
+        if provider == "auto":
+            provider = next((p for p in ("anthropic", "gemini", "openrouter")
+                             if cur.get(PROVIDER_KEY[p])), "openrouter")
+        key = step_key(cur.get(PROVIDER_KEY[provider], ""), provider)
         print("\n[3/4] Owner — prove this Telegram account owns the bot")
         owner_id, tg_name = step_owner(token, me, cur.get("OWNER_USER_ID", ""))
         print("\n[4/4] Name and model")
         first = ask("Your first name (used in the persona)", cur.get("OWNER_FIRST_NAME") or tg_name)
-        model = step_model(cur.get("OPENROUTER_MODEL") or DEFAULT_MODEL)
+        model_key = {"openrouter": "OPENROUTER_MODEL", "gemini": "GEMINI_MODEL",
+                     "anthropic": "ANTHROPIC_MODEL"}[provider]
+        default_model = {"openrouter": DEFAULT_MODEL, "gemini": "gemini-3.8-flash",
+                         "anthropic": "claude-haiku-5-5"}[provider]
+        model = step_model(cur.get(model_key) or default_model, provider, key)
         values = {
             "TG_BOT_TOKEN": token,
-            "OPENROUTER_API_KEY": key,
+            "LLM_PROVIDER": selection,
+            PROVIDER_KEY[provider]: key,
             "OWNER_USER_ID": str(owner_id),
             "OWNER_FIRST_NAME": first,
-            "OPENROUTER_MODEL": model,
+            model_key: model,
         }
+        selected_provider(selection, {**cur, **values})
+        if provider == "gemini":
+            values["GEMINI_EXTRACTOR_MODEL"] = step_model(
+                cur.get("GEMINI_EXTRACTOR_MODEL") or "gemini-3.1-flash-lite",
+                provider, key, "Extractor and voice model",
+            )
         # Saved so /dashboard can print the real tunnel command (the bot can't see SSH_CONNECTION).
         hint = ssh_hint(int(cur.get("DASHBOARD_PORT") or 8780), os.environ)
         if hint:
@@ -385,6 +466,9 @@ def main() -> int:
         if not ask_yes(f"Write these to {ENV_PATH}?"):
             print("aborted — nothing written")
             return 1
+    except SetupError as e:
+        print(f"\n! {e}\naborted — nothing written")
+        return 1
     except (KeyboardInterrupt, EOFError):
         print("\naborted — nothing written")
         return 1

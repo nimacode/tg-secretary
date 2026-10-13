@@ -113,6 +113,13 @@ FA: dict[str, str] = {
     "Models": "مدل\u200cها",
     "OpenRouter model ids. Saved to .env (the old one is backed up).":
         "شناسه مدل\u200cهای هوش مصنوعی در OpenRouter. با ذخیره، از تنظیمات قبلی نسخه پشتیبان گرفته می\u200cشه.",
+    "Native model ids. Saved to .env (the old one is backed up).":
+        "شناسه بومی مدل‌ها. با ذخیره، از تنظیمات قبلی نسخه پشتیبان گرفته می‌شه.",
+    "Extractor and voice model": "مدل یادگیری اطلاعات و تبدیل صدا",
+    "AI provider": "ارائه‌دهنده هوش مصنوعی",
+    "Automatic": "خودکار",
+    "Gemini API key": "کلید API در Gemini",
+    "Anthropic API key": "کلید API در Anthropic",
     "These take effect after a restart.": "این\u200cها بعد از راه\u200cاندازی دوباره اعمال می\u200cشن.",
     "Reply model": "مدل جواب",
     "Extractor model": "مدل یادگیری اطلاعات",
@@ -162,7 +169,7 @@ FA: dict[str, str] = {
     "Nothing changed.": "چیزی تغییر نکرد.",
     "Saved and applied.": "ذخیره شد.",
     "Saved. Applies to the next message.": "ذخیره شد. از پیام بعدی اعمال می\u200cشه.",
-    "Saved. Restart to apply the token, key or owner change.": "ذخیره شد. برای اعمال تغییر توکن، کلید یا مالک، راه\u200cاندازی دوباره لازمه.",
+    "Saved. Restart to apply the provider, token, key or owner change.": "ذخیره شد. برای اعمال تغییر ارائه‌دهنده، توکن، کلید یا مالک، راه‌اندازی دوباره لازمه.",
     "Quiet hours need both a start and an end time.": "ساعت\u200cهای سکوت هم شروع می\u200cخوان هم پایان.",
     "Unknown voice setting.": "این گزینه معتبر نیست.",
     "must be a whole number (blank = default).": "باید عدد صحیح باشه (خالی = پیش\u200cفرض).",
@@ -170,6 +177,8 @@ FA: dict[str, str] = {
     "must be a positive whole number.": "باید عدد صحیح مثبت باشه.",
     "History turns must be between 1 and 100.": "تعداد پیام\u200cهای قبلی باید بین ۱ تا ۱۰۰ باشه.",
     "Unknown model id:": "شناسه مدل معتبر نیست:",
+    "This model has no supported credit pricing.": "محاسبه اعتبار برای این مدل پشتیبانی نمی‌شه.",
+    "Unknown AI provider.": "ارائه‌دهنده هوش مصنوعی معتبر نیست.",
     "Couldn't reach the service to check it; nothing saved.": "به سرویس وصل نشدم تا بررسی کنم؛ چیزی ذخیره نشد. دوباره امتحان کن.",
     "Couldn't write .env; nothing applied.": "نتونستم .env رو بنویسم؛ چیزی اعمال نشد.",
     "No active business connection yet. Connect the bot in Telegram first.":

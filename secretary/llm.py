@@ -4,7 +4,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from . import claude
+from . import claude, gemini
 from .config import settings
 from .prompts import defang
 
@@ -60,7 +60,7 @@ def _clean_output(text: str) -> str:
     return _strip_terminal_periods(text.strip())
 
 client = AsyncOpenAI(
-    api_key=settings.openrouter_api_key or "unused",  # Claude provider: this client is never called
+    api_key=settings.openrouter_api_key or "unused",  # Direct providers never call this client
     base_url="https://openrouter.ai/api/v1",
     timeout=60,
     default_headers={
@@ -101,6 +101,8 @@ async def generate_reply(
     wrapped = f"<<<contact_message>>>\n{defang(user_message)}\n<<<end_contact_message>>>"
     if settings.provider == "anthropic" and not model:
         return await _claude_reply(system_prompt, history, wrapped, summary)
+    if settings.provider == "gemini" and not model:
+        return await _gemini_reply(system_prompt, history, wrapped, summary)
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if summary:
         messages.append(
@@ -150,6 +152,23 @@ async def _claude_reply(system_prompt: str, history: list[dict[str, Any]], wrapp
     log.debug("claude request: model=%s msgs=%d", settings.anthropic_model, len(messages))
     for _ in range(2):  # one retry on an empty reply, like the OpenRouter path
         text = _clean_output(await claude.complete(system=system, messages=messages, max_tokens=2048))
+        if text:
+            return text
+    return ""
+
+
+async def _gemini_reply(system_prompt: str, history: list[dict[str, Any]], wrapped: str,
+                        summary: str | None) -> str:
+    system = system_prompt
+    if summary:
+        system += f"\n\n[earlier context summary] {defang(summary)}"
+    messages = [*history, {"role": "user", "content": wrapped}]
+    log.debug("gemini request: model=%s msgs=%d", settings.gemini_model, len(messages))
+    for _ in range(2):  # Same empty-reply retry as the other providers.
+        text = _clean_output(await gemini.complete(
+            system=system, messages=messages, max_tokens=4096,
+            frequency_penalty=0.4, presence_penalty=0.2,
+        ))
         if text:
             return text
     return ""

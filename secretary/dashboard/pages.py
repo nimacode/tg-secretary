@@ -68,10 +68,16 @@ def _credit_view(credit: dict | None) -> dict | None:
 
 async def _credit() -> dict | None:
     """Same shape as OpenRouter's /key: limit, usage, limit_remaining (None = no cap)."""
-    if settings.provider == "anthropic":
+    if settings.provider in ("anthropic", "gemini"):
+        if settings.provider == "gemini":
+            from ..gemini import PRICES
+            if settings.gemini_model not in PRICES or settings.gemini_extractor_model not in PRICES:
+                return None  # unknown pricing is not zero-cost usage
         used = await db.usage_total()
-        limit = settings.credit_limit_usd or None
-        return {"limit": limit, "usage": used, "limit_remaining": (limit - used) if limit else None}
+        limit: float | None = settings.credit_limit_usd
+        if not limit and not (settings.provider == "gemini" and settings.hosted):
+            limit = None
+        return {"limit": limit, "usage": used, "limit_remaining": (limit - used) if limit is not None else None}
     try:
         return await asyncio.to_thread(setup.or_key_info, settings.openrouter_api_key, 5)
     except Exception:  # noqa: BLE001 — credit is informational; never break the page
@@ -125,18 +131,27 @@ _RETENTION_LABELS = {0: "Forever", 1: "1 day", 7: "A week", 30: "A month"}
 # Rendered as their own controls, not in the technical number list.
 _OWN_CONTROL = {"delay_override", "retention_days"}
 # .env keys the bot reads per call, so assigning them on `settings` applies at once.
-LIVE_ENV_KEYS = ("OPENROUTER_MODEL", "EXTRACTOR_MODEL", "WHISPER_MODEL", "OWNER_FIRST_NAME", "HISTORY_TURNS")
-RESTART_KEYS = {"TG_BOT_TOKEN", "OPENROUTER_API_KEY", "OWNER_USER_ID"}
-# Whisper is an audio model and may be missing from /models, so only these are checked.
-CHECKED_MODEL_KEYS = ("OPENROUTER_MODEL", "EXTRACTOR_MODEL")
+LIVE_ENV_KEYS = ("OPENROUTER_MODEL", "EXTRACTOR_MODEL", "WHISPER_MODEL",
+                 "GEMINI_MODEL", "GEMINI_EXTRACTOR_MODEL", "OWNER_FIRST_NAME", "HISTORY_TURNS")
+RESTART_KEYS = {"TG_BOT_TOKEN", "OWNER_USER_ID", "LLM_PROVIDER", *setup.PROVIDER_KEY.values()}
+MODEL_KEYS = {"openrouter": ("OPENROUTER_MODEL", "EXTRACTOR_MODEL"),
+              "gemini": ("GEMINI_MODEL", "GEMINI_EXTRACTOR_MODEL"), "anthropic": ()}
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _models_cache: tuple[float, set[str] | None] = (0.0, None)
 
 
 async def _model_ids() -> set[str] | None:
+    """Only fetch the active provider's catalogue; cache OpenRouter for 10 minutes."""
     if settings.provider == "anthropic":
-        return None  # fixed model, no OpenRouter catalogue
-    """OpenRouter model ids, cached 10 minutes (the list is large; None = unavailable)."""
+        return None
+    if settings.provider == "gemini":
+        if settings.hosted or settings.credit_limit_usd > 0:
+            from ..gemini import PRICES
+            return set(PRICES)
+        try:
+            return await asyncio.to_thread(setup.gemini_model_ids, settings.gemini_api_key)
+        except (setup.SetupError, httpx.TransportError):
+            return None
     global _models_cache
     fetched_at, ids = _models_cache
     if time.time() - fetched_at > 600:
@@ -274,52 +289,77 @@ async def wipe(request: Request):
 @router.post("/settings/config")
 async def save_config(request: Request):
     form = await request.form()
-    current = {
-        "OPENROUTER_MODEL": settings.openrouter_model,
-        "EXTRACTOR_MODEL": settings.extractor_model,
-        "WHISPER_MODEL": settings.whisper_model,
-        "OWNER_FIRST_NAME": settings.owner_first_name,
-        "HISTORY_TURNS": str(settings.history_turns),
-        "OWNER_USER_ID": str(settings.owner_user_id),
-    }
-    if settings.hosted:
-        current.pop("OWNER_USER_ID")
+    current = {key: str(getattr(settings, key.lower())) for key in LIVE_ENV_KEYS}
+    if not settings.hosted:
+        current["OWNER_USER_ID"] = str(settings.owner_user_id)
     changes: dict[str, str] = {}
-    for key, old in current.items():
-        if key not in form:  # partial form (e.g. only the technical models): leave it as is
+    selection = settings.llm_provider
+    keys = {key: getattr(settings, key.lower()) for key in setup.PROVIDER_KEY.values()}
+    if not settings.hosted:
+        selection = str(form.get("LLM_PROVIDER", selection)).strip()
+        for key, old in keys.items():
+            new = str(form.get(key, "")).strip()
+            if new and new != old:
+                keys[key] = new
+                changes[key] = new
+        if selection != settings.llm_provider:
+            changes["LLM_PROVIDER"] = selection
+    try:
+        provider = setup.selected_provider(selection, keys)
+    except setup.SetupError as e:
+        return back("/settings", err=str(e))
+    allowed = {"OWNER_FIRST_NAME", "HISTORY_TURNS", *MODEL_KEYS[provider]}
+    if provider == "openrouter":
+        allowed.add("WHISPER_MODEL")
+    if not settings.hosted:
+        allowed.add("OWNER_USER_ID")
+    for key in allowed:
+        if key not in form:
             continue
         new = str(form.get(key, "")).strip()
         if not new:
             return back("/settings", err=f"{key} " + t("can't be empty."))
         if key in ("HISTORY_TURNS", "OWNER_USER_ID"):
-            # pydantic rejects non-ASCII digits at import: a raw "۸۰۱" in .env would
-            # crash-loop the bot after restart, so store the ASCII form.
             n = _to_int(new)
             if n is None or n <= 0:
                 return back("/settings", err=f"{key} " + t("must be a positive whole number."))
             new = str(n)
-        if new != old:
+        if new != current[key]:
             changes[key] = new
-    if not 1 <= int(changes.get("HISTORY_TURNS", "1")) <= 100:
+    if not 1 <= int(changes.get("HISTORY_TURNS", current["HISTORY_TURNS"])) <= 100:
         return back("/settings", err="History turns must be between 1 and 100.")
-    ids = await _model_ids()
-    for key in CHECKED_MODEL_KEYS:
-        if key in changes and ids is not None and changes[key] not in ids:
-            return back("/settings", err=t("Unknown model id:") + f" {changes[key]}")
-    if not settings.hosted:
-        token = str(form.get("TG_BOT_TOKEN", "")).strip()
-        api_key = str(form.get("OPENROUTER_API_KEY", "")).strip()
-        try:
+    try:
+        if not settings.hosted:
+            token = str(form.get("TG_BOT_TOKEN", "")).strip()
             if token and token != settings.tg_bot_token:
                 await asyncio.to_thread(setup.tg_get_me, token)
                 changes["TG_BOT_TOKEN"] = token
-            if api_key and api_key != settings.openrouter_api_key:
-                await asyncio.to_thread(setup.or_key_info, api_key)
-                changes["OPENROUTER_API_KEY"] = api_key
-        except setup.SetupError as e:
-            return back("/settings", err=str(e))
-        except httpx.TransportError as e:
-            return back("/settings", err=t("Couldn't reach the service to check it; nothing saved.") + f" ({type(e).__name__})")
+        provider_changed = provider != settings.provider or "LLM_PROVIDER" in changes
+        if provider == "gemini":
+            models = [changes.get(key, current[key]) for key in MODEL_KEYS[provider]]
+            if settings.hosted or settings.credit_limit_usd > 0:
+                from ..gemini import PRICES
+                if any(model not in PRICES for model in models):
+                    return back("/settings", err="This model has no supported credit pricing.")
+            # Authenticate and validate using the new key, never the old provider's catalogue.
+            if provider_changed or "GEMINI_API_KEY" in changes or any(k in changes for k in MODEL_KEYS[provider]):
+                ids = await asyncio.to_thread(setup.gemini_model_ids, keys["GEMINI_API_KEY"])
+                for model in models:
+                    if model not in ids:
+                        return back("/settings", err=t("Unknown model id:") + f" {model}")
+        elif provider == "openrouter":
+            if provider_changed or "OPENROUTER_API_KEY" in changes:
+                await asyncio.to_thread(setup.or_key_info, keys["OPENROUTER_API_KEY"])
+            ids = await _model_ids() if settings.provider == "openrouter" else await asyncio.to_thread(setup.or_model_ids)
+            for key in MODEL_KEYS[provider]:
+                if (key in changes or provider_changed) and ids is not None and changes.get(key, current[key]) not in ids:
+                    return back("/settings", err=t("Unknown model id:") + f" {changes.get(key, current[key])}")
+        elif provider_changed or "ANTHROPIC_API_KEY" in changes:
+            await asyncio.to_thread(setup.anthropic_key_info, keys["ANTHROPIC_API_KEY"])
+    except setup.SetupError as e:
+        return back("/settings", err=str(e))
+    except httpx.TransportError as e:
+        return back("/settings", err=t("Couldn't reach the service to check it; nothing saved.") + f" ({type(e).__name__})")
     if not changes:
         return back("/settings", msg="Nothing changed.")
     try:
@@ -330,7 +370,7 @@ async def save_config(request: Request):
         if key in changes:
             setattr(settings, key.lower(), int(changes[key]) if key == "HISTORY_TURNS" else changes[key])
     if changes.keys() & RESTART_KEYS:
-        return back("/settings", msg="Saved. Restart to apply the token, key or owner change.", restart="1")
+        return back("/settings", msg="Saved. Restart to apply the provider, token, key or owner change.", restart="1")
     return back("/settings", msg="Saved and applied.")
 
 

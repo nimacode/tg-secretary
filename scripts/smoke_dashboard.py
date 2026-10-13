@@ -15,6 +15,18 @@ KEY = "sk-or-v1-smokekeysmokekeysmokekey77"
 os.environ.update(
     TG_BOT_TOKEN=TOKEN,
     OPENROUTER_API_KEY=KEY,
+    LLM_PROVIDER="auto",
+    ANTHROPIC_API_KEY="",
+    ANTHROPIC_MODEL="claude-haiku-5-5",
+    GEMINI_API_KEY="",
+    GEMINI_MODEL="gemini-3.8-flash",
+    GEMINI_EXTRACTOR_MODEL="gemini-3.1-flash-lite",
+    OPENROUTER_MODEL="google/gemini-3.8-flash",
+    EXTRACTOR_MODEL="google/gemini-3.1-flash-lite",
+    WHISPER_MODEL="openai/whisper-large-v3",
+    CREDIT_LIMIT_USD="0",
+    HOSTED="0",
+    DASHBOARD_LANG="en",
     OWNER_USER_ID="111",
     DB_PATH=str(_tmp / "smoke.db"),
     PROMPTS_DIR=str(_tmp / "prompts"),
@@ -39,6 +51,8 @@ from secretary import setup  # noqa: E402
 setup.or_key_info = lambda key, timeout=15: {"limit_remaining": 4.2, "usage": 1.0}
 setup.or_model_ids = lambda: {"openai/gpt-5.5", "google/gemini-3.1-flash-lite", "a/b"}
 setup.tg_get_me = lambda token: {"username": "new_bot", "can_connect_to_business": True}
+setup.gemini_model_ids = lambda key, timeout=20: {"gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"}
+setup.anthropic_key_info = lambda key: None
 
 BASE = "http://127.0.0.1:8780"
 ORIGIN = {"origin": BASE}
@@ -202,6 +216,9 @@ def config_form(**over: str) -> dict[str, str]:
         "OWNER_USER_ID": str(settings.owner_user_id),
         "TG_BOT_TOKEN": "",
         "OPENROUTER_API_KEY": "",
+        "LLM_PROVIDER": settings.llm_provider,
+        "GEMINI_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
     }
     return {**base, **over}
 
@@ -431,7 +448,7 @@ async def check_privacy(app) -> None:
 
 
 async def check_claude_mode(app) -> None:
-    """ANTHROPIC_API_KEY set: no OpenRouter fields, voice "coming soon", credit from llm_usage."""
+    """Anthropic uses its fixed model, disables voice, and reads local credit."""
     settings.anthropic_api_key, settings.credit_limit_usd = "k", 2.0
     await db.add_usage(model="claude-haiku-5-5", input_tokens=1, output_tokens=1,
                        cache_read_tokens=0, cache_write_tokens=0, cost_usd=0.5)
@@ -439,11 +456,112 @@ async def check_claude_mode(app) -> None:
         async with await authed(app) as c:
             r = await c.get("/settings")
             assert "OPENROUTER_MODEL" not in r.text and "claude-haiku-5-5" in r.text
-            assert "Coming soon" in r.text and 'name="voice_override"' not in r.text
+            assert 'name="voice_override"' not in r.text
             r = await c.get("/")
             assert r.status_code == 200 and "1.50" in r.text and "claude-haiku-5-5" in r.text
     finally:
         settings.anthropic_api_key, settings.credit_limit_usd = "", 0.0
+
+
+async def check_gemini_mode(app) -> None:
+    from dotenv import dotenv_values
+    from unittest.mock import patch
+    from secretary.dashboard import pages
+
+    attrs = ("llm_provider", "gemini_api_key", "anthropic_api_key", "gemini_model",
+             "gemini_extractor_model", "openrouter_api_key", "credit_limit_usd",
+             "hosted", "dashboard_proxy_secret")
+    old = {attr: getattr(settings, attr) for attr in attrs}
+    env_before = ENV.read_text(encoding="utf-8")
+    key = "AIza-smoke-dashboard-secret-middle-7788"
+    anth_key = "sk-ant-dashboard-secret-middle-9922"
+    catalogue_calls = []
+
+    def catalogue(submitted_key, timeout=20):
+        catalogue_calls.append(submitted_key)
+        if submitted_key == "bad-key":
+            raise setup.SetupError("Gemini rejected this key.")
+        assert submitted_key == key  # switching validates the newly submitted key
+        return {"gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unexpected OpenRouter request in Gemini mode")
+
+    try:
+        async with await authed(app) as c:
+            before = ENV.read_text(encoding="utf-8")
+            for selection in ("gemini", "invalid"):
+                r = await c.post("/settings/config", data={"LLM_PROVIDER": selection})
+                assert "err=" in r.headers["location"] and ENV.read_text(encoding="utf-8") == before
+            with patch.object(setup, "gemini_model_ids", catalogue), \
+                 patch.object(setup, "or_model_ids", forbidden), patch.object(setup, "or_key_info", forbidden):
+                r = await c.post("/settings/config", data={"LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "bad-key"})
+                assert "err=" in r.headers["location"] and ENV.read_text(encoding="utf-8") == before
+                catalogue_calls.clear()
+                r = await c.post("/settings/config", data={
+                    "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": key,
+                    "GEMINI_MODEL": "gemini-3.8-flash", "GEMINI_EXTRACTOR_MODEL": "gemini-3.1-flash-lite",
+                })
+                assert "restart=1" in r.headers["location"] and "err=" not in r.headers["location"]
+                saved = dotenv_values(ENV)
+                assert saved["LLM_PROVIDER"] == "gemini" and saved["GEMINI_API_KEY"] == key
+                assert settings.provider == "openrouter" and settings.gemini_api_key == ""  # restart-bound
+                settings.llm_provider, settings.gemini_api_key = "gemini", key  # emulate restart
+                settings.anthropic_api_key = anth_key
+                r = await c.get("/settings")
+                assert r.status_code == 200
+                assert key not in r.text and anth_key not in r.text and KEY not in r.text
+                assert setup.mask(key) in r.text and setup.mask(anth_key) in r.text
+                assert 'name="GEMINI_MODEL"' in r.text and 'name="GEMINI_EXTRACTOR_MODEL"' in r.text
+                assert 'name="OPENROUTER_MODEL"' not in r.text and 'name="WHISPER_MODEL"' not in r.text
+                assert 'name="voice_override"' in r.text
+                assert "err=" not in (await c.post("/settings/config", data={"GEMINI_MODEL": "gemini-3.6-flash"})).headers["location"]
+                assert settings.gemini_model == "gemini-3.6-flash"
+                before = ENV.read_text(encoding="utf-8")
+                r = await c.post("/settings/config", data={"GEMINI_MODEL": "google/gemini-3.1-flash-lite"})
+                assert "err=" in r.headers["location"] and ENV.read_text(encoding="utf-8") == before
+                settings.credit_limit_usd = 2.0
+                credit = await pages._credit()
+                assert credit["usage"] == await db.usage_total()
+                assert credit["limit_remaining"] == 2.0 - credit["usage"]
+                n = len(catalogue_calls)
+                r = await c.post("/settings/config", data={"GEMINI_MODEL": "gemini-unpriced"})
+                assert "err=" in r.headers["location"] and len(catalogue_calls) == n
+                settings.credit_limit_usd, settings.gemini_model = 0.0, "gemini-unpriced"
+                assert await pages._credit() is None  # unknown prices never look like free credit
+                settings.gemini_model = "gemini-3.8-flash"
+                # Explicit switching back to OR works even while Gemini and Anthropic keys remain.
+            with patch.object(setup, "or_key_info"):
+                r = await c.post("/settings/config", data={"LLM_PROVIDER": "openrouter"})
+                assert "restart=1" in r.headers["location"] and dotenv_values(ENV)["LLM_PROVIDER"] == "openrouter"
+
+        settings.hosted, settings.dashboard_proxy_secret = True, "gemini-proxy"
+        credit = await pages._credit()
+        assert credit["limit"] == 0 and credit["limit_remaining"] <= 0
+        assert not pages._credit_view(credit)["unlimited"]
+        hosted_app = create_app(BOT, lambda: None, env_path=ENV)
+        with patch.object(setup, "gemini_model_ids", catalogue), \
+             patch.object(setup, "or_model_ids", forbidden), patch.object(setup, "or_key_info", forbidden):
+            async with client(hosted_app, headers={"x-platform-auth": "gemini-proxy"}) as c:
+                page = (await c.get("/settings")).text
+                for field in ("LLM_PROVIDER", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+                    assert f'name="{field}"' not in page
+                r = await c.post("/settings/config", data={
+                    "LLM_PROVIDER": "openrouter", "GEMINI_API_KEY": "evil", "ANTHROPIC_API_KEY": "evil",
+                    "OPENROUTER_API_KEY": "evil", "GEMINI_MODEL": "gemini-3.6-flash",
+                })
+                assert "err=" not in r.headers["location"] and "restart=" not in r.headers["location"]
+                saved = dotenv_values(ENV)
+                assert saved["GEMINI_API_KEY"] == key and saved["LLM_PROVIDER"] == "openrouter"
+                assert saved["GEMINI_MODEL"] == "gemini-3.6-flash"
+                before, n = ENV.read_text(encoding="utf-8"), len(catalogue_calls)
+                r = await c.post("/settings/config", data={"GEMINI_MODEL": "gemini-unpriced"})
+                assert "err=" in r.headers["location"] and ENV.read_text(encoding="utf-8") == before
+                assert len(catalogue_calls) == n
+    finally:
+        for attr, value in old.items():
+            setattr(settings, attr, value)
+        ENV.write_text(env_before, encoding="utf-8")
 
 
 async def check_prompts(app) -> None:
@@ -722,6 +840,7 @@ async def main() -> None:
         await check_contacts(app)
         await check_privacy(app)
         await check_claude_mode(app)
+        await check_gemini_mode(app)
         await check_prompts(app)
         await check_contacts_tone(app)
         await check_drafts(app)
