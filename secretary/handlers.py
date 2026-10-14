@@ -12,6 +12,7 @@ from . import db, innercircle, llm
 from . import memory as memory_module
 from . import voice as voice_module
 from .config import settings
+from .gemini_http import GeminiAPIError
 from .prompts import load_system_prompt
 
 log = logging.getLogger(__name__)
@@ -549,11 +550,12 @@ async def _handle_inbound_text(
                     "Credit used up: no replies until you top up.\nاعتبارت تموم شده؛ تا شارژ دوباره، جوابی فرستاده نمی\u200cشه.",
                 )
             return
+        detail = str(e) if isinstance(e, GeminiAPIError) and not settings.hosted else type(e).__name__
         await _notify_owner(
             ctx,
             owner_chat_id,
             f"\U0001f4e9 From {contact_name} (chat {chat_id}): LLM call failed "
-            f"({type(e).__name__}) — no reply sent.",
+            f"({detail}) — no reply sent.",
         )
         return
     finally:

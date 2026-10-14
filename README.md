@@ -115,6 +115,38 @@ No OpenRouter key is needed. Native Gemini IDs have no `google/` prefix. Calls u
 
 Gemini cost estimates use [standard paid-tier prices](https://ai.google.dev/gemini-api/docs/pricing), including thinking, cached input and audio tokens; they are not a lookup of Google's billing balance or free-tier usage. Metered models are `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite`. Flash introductory prices switch to the published standard rate on January 1, 2027. Other native models can run standalone without a cap, but USD accounting is unavailable and the credit panel is hidden; hosted/capped configurations reject unpriced models before a paid call.
 
+### Verify the official Gemini connection
+
+Create the key in [Google AI Studio](https://aistudio.google.com/apikey), in the project with the billing/quota you intend to use. [Unrestricted standard keys are rejected](https://ai.google.dev/gemini-api/docs/generate-content/api-key); create a new AI Studio authorization key or restrict an existing standard key to the Generative Language API. The server must be in a [supported region](https://ai.google.dev/gemini-api/docs/available-regions). Prefer a paid project for private chats; free-tier data policies differ.
+
+After setting the four Gemini variables above, run from the directory containing the bot's `.env`:
+
+```bash
+uv run python scripts/check_gemini.py
+```
+
+This checks the key/model catalogue, then makes **real generation requests** through the bot's reply and structured-JSON memory/style paths. Listing models alone does not prove generation access. The check uses synthetic inputs, sends no Telegram messages, never uploads stored chats, and uses the normal credit cap and usage accounting. Calls can incur Google API charges.
+
+To also exercise OGG/Opus voice transcription with a sample you authorize sending to Google:
+
+```bash
+uv run python scripts/check_gemini.py --voice sample.ogg --expect-transcript "expected phrase"
+```
+
+The transcript is checked without being printed. A failed check exits nonzero. Errors include safe Google status/reason codes, not echoed keys or message contents:
+
+- `API_KEY_INVALID` / `API_KEY_EXPIRED`: replace the key in AI Studio and `.env`.
+- HTTP 403: check API/IP restrictions, Generative Language API access and regional availability.
+- `FAILED_PRECONDITION`: check billing and free-tier regional availability.
+- HTTP 402: add Google project billing credits; the local credit cap is not Google's balance.
+- HTTP 429: check the project's model quota, rate limits and billing tier.
+- HTTP 404: select a native model available to this key, without the OpenRouter `google/` prefix.
+
+After a successful check, restart with `pm2 restart tg-secretary` (or start with `pm2 start ecosystem.config.cjs`), then DM `/preview سلام` to the bot. To test auto-replies, remember the default 600-second owner-active cooldown; `/cooldown 0` temporarily disables it.
+
+REST implementation note: [`responseFormat.text.mimeType`](https://ai.google.dev/api/generate-content#TextResponseFormat) is a protobuf enum: JSON uses `APPLICATION_JSON`, not the `application/json` MIME string accepted by the older `responseMimeType` field. Using the MIME string in the new field returns HTTP 400 and breaks memory/style extraction.
+
+
 ## Dashboard
 
 The bot serves a web dashboard on `127.0.0.1:8780` (`DASHBOARD_PORT` to change, `DASHBOARD_ENABLED=false` to turn off). Send `/dashboard` to the bot for a one-time login link. On a server, tunnel first: `ssh -L 8780:127.0.0.1:8780 user@server`.

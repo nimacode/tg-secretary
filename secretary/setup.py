@@ -25,11 +25,12 @@ from typing import Any
 import httpx
 from dotenv import dotenv_values, set_key
 
+from .gemini_http import API_URL, GeminiAPIError
+
 ENV_PATH = Path(".env")
 EXAMPLE_PATH = Path(".env.example")
 TG_API = "https://api.telegram.org"
 OR_API = "https://openrouter.ai/api/v1"
-GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 PROVIDERS = ("auto", "openrouter", "gemini", "anthropic")
 PROVIDER_KEY = {"openrouter": "OPENROUTER_API_KEY", "gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 DEFAULT_MODEL = "google/gemini-3.8-flash"
@@ -176,11 +177,11 @@ def gemini_model_ids(key: str, timeout: float = 20) -> set[str]:
     seen: set[str] = set()
     while True:
         r = httpx.get(
-            f"{GEMINI_API}/models", headers={"x-goog-api-key": key},
+            f"{API_URL}/models", headers={"x-goog-api-key": key},
             params={"pageToken": page} if page else {}, timeout=timeout,
         )
         if r.status_code != 200:
-            raise SetupError(f"Gemini rejected the model catalogue request (HTTP {r.status_code}).")
+            raise SetupError(str(GeminiAPIError(r))) from None
         body = _json(r, "Gemini")
         for model in body.get("models", []):
             if "generateContent" in model.get("supportedGenerationMethods", []):

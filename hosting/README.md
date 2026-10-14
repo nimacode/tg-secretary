@@ -16,6 +16,9 @@ The server must have direct egress to Telegram, the configured model API, and ce
 
 After changing the hosting provider, restart the control plane, then restart each existing tenant from `/admin`. Provisioning writes an explicit tenant `LLM_PROVIDER` and removes obsolete credentials while preserving unrelated settings. Tenant dashboards cannot change platform keys/providers or select unpriced Gemini models.
 
+For Gemini, model listing does not prove generation permission/quota. After provisioning/restarting a tenant, run the [live connection check](../README.md#verify-the-official-gemini-connection) from that tenant's directory so it reads the tenant `.env` and preserves its credit cap/accounting: `uv run python ../../scripts/check_gemini.py` for the default `tenants/<id>/` layout. It sends synthetic text/JSON only (voice is opt-in), not stored chats, and can incur Google API charges. Safe Google status/reason codes appear in tenant error logs; raw echoed keys/messages do not.
+
+
 ## Admin
 
 Sign in with the Telegram account matching `ADMIN_TG_ID`, open `/admin`. After a user pays, record the amount there: it raises their OpenRouter key limit or locally metered native-provider cap and starts their tenant. The same page can restart or stop a tenant.

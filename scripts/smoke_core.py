@@ -189,6 +189,7 @@ async def check_gemini() -> None:
     from pydantic import ValidationError
     from secretary import llm
     from secretary.config import Settings
+    from secretary.gemini_http import GeminiAPIError
 
     values = dict(tg_bot_token="0:smoke", owner_user_id=111, openrouter_api_key="or",
                   anthropic_api_key="ant", gemini_api_key="gem", _env_file=None)
@@ -201,6 +202,18 @@ async def check_gemini() -> None:
         raise AssertionError("explicit Gemini selection accepted a missing key")
     except ValidationError:
         pass
+
+    # Google's errors may echo a key/prompt in message/metadata; notifications and
+    # /preview must retain actionable codes without disclosing any echoed content.
+    private = "private-key-and-contact-message"
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent",
+                            headers={"x-goog-api-key": private})
+    error = GeminiAPIError(httpx.Response(400, request=request, json={"error": {
+        "status": "INVALID_ARGUMENT", "message": private,
+        "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID",
+                     "metadata": {"key": private, "prompt": private}}],
+    }}))
+    assert "API_KEY_INVALID" in str(error) and private not in str(error)
 
     cfg = gemini.settings
     saved = cfg.model_dump()

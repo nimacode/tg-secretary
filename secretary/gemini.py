@@ -9,9 +9,9 @@ import httpx
 
 from . import db
 from .config import settings
+from .gemini_http import API_URL, GeminiAPIError
 
 log = logging.getLogger(__name__)
-API_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # Standard paid-tier USD per 1M tokens: text input, audio input, output incl. thinking.
 # https://ai.google.dev/gemini-api/docs/pricing
@@ -100,7 +100,8 @@ async def complete(*, system: str, messages: list[dict[str, Any]], model: str | 
     elif model.startswith("gemini-2.5"):
         config["thinkingConfig"] = {"thinkingBudget": 128 if "pro" in model else 0, "includeThoughts": False}
     if json_output:
-        config["responseFormat"] = {"text": {"mimeType": "application/json"}}
+        # Unlike responseMimeType, responseFormat.text.mimeType is a protobuf enum.
+        config["responseFormat"] = {"text": {"mimeType": "APPLICATION_JSON"}}
     if frequency_penalty:
         config["frequencyPenalty"] = frequency_penalty
     if presence_penalty:
@@ -111,7 +112,8 @@ async def complete(*, system: str, messages: list[dict[str, Any]], model: str | 
         json={"systemInstruction": {"parts": [{"text": system}]},
               "contents": contents, "generationConfig": config},
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        raise GeminiAPIError(resp)
     data = resp.json()
     usage = data.get("usageMetadata")
     if model in PRICES and usage is not None:
