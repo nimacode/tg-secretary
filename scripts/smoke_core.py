@@ -184,6 +184,7 @@ async def main() -> None:
 
 async def check_gemini() -> None:
     """Thought/refusal safety, capped spend, selection errors and native billing boundaries."""
+    import json
     import httpx
     from datetime import date, datetime, timezone
     from pydantic import ValidationError
@@ -225,6 +226,14 @@ async def check_gemini() -> None:
     replies: list[dict | int] = []
 
     def response(req: httpx.Request) -> httpx.Response:
+        # Model-level validation happens after authentication; an invalid-key
+        # wire probe cannot catch Gemini's rejection of repetition penalties.
+        config = json.loads(req.content).get("generationConfig", {})
+        if "frequencyPenalty" in config or "presencePenalty" in config:
+            return httpx.Response(400, json={"error": {
+                "status": "INVALID_ARGUMENT",
+                "message": "Penalty is not enabled for this model",
+            }})
         body = replies.pop(0)
         return httpx.Response(body, json={"error": "unavailable"}) if isinstance(body, int) else httpx.Response(200, json=body)
 

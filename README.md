@@ -100,7 +100,7 @@ Set `LLM_PROVIDER` to `gemini`, `anthropic`, or `openrouter`. The default `auto`
 | Memory / summaries / style | `GEMINI_EXTRACTOR_MODEL`, default `gemini-3.1-flash-lite` | same model | `EXTRACTOR_MODEL`, default `google/gemini-3.1-flash-lite` |
 | Voice notes | native OGG transcription on `GEMINI_EXTRACTOR_MODEL` | passed to you, no transcription | `WHISPER_MODEL`, default `openai/whisper-large-v3` |
 | Cost tracking | local paid-tier estimate in `llm_usage`; `CREDIT_LIMIT_USD` caps calls | `llm_usage`; `CREDIT_LIMIT_USD` stops replies at a cap | handled by the OpenRouter key limit |
-| Reply generation | low thinking (minimal for Flash-Lite), frequency/presence penalties; no deprecated temperature | no sampling parameters; low effort | temperature 0.6 plus frequency/presence penalties |
+| Reply generation | low thinking (minimal for Flash-Lite); model defaults, no custom sampling or repetition penalties | no sampling parameters; low effort | temperature 0.6 plus frequency/presence penalties |
 
 For direct Gemini, add this to `.env` alongside your Telegram token and owner ID:
 
@@ -112,6 +112,8 @@ GEMINI_EXTRACTOR_MODEL=gemini-3.1-flash-lite
 ```
 
 No OpenRouter key is needed. Native Gemini IDs have no `google/` prefix. Calls use Google's [generateContent API](https://ai.google.dev/gemini-api/docs/generate-content/text-generation), with the key in a header, not a logged URL. API failures are not silently routed to another provider.
+
+The native Gemini path intentionally omits `frequencyPenalty` and `presencePenalty`: [Gemini 3.6 Flash and newer reject them](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/content-generation-parameters#token-penalization-parameters). A field appearing in the generic `GenerationConfig` reference does not mean every model accepts it. OpenRouter retains its existing temperature and repetition penalties.
 
 Gemini cost estimates use [standard paid-tier prices](https://ai.google.dev/gemini-api/docs/pricing), including thinking, cached input and audio tokens; they are not a lookup of Google's billing balance or free-tier usage. Metered models are `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite`. Flash introductory prices switch to the published standard rate on January 1, 2027. Other native models can run standalone without a cap, but USD accounting is unavailable and the credit panel is hidden; hosted/capped configurations reject unpriced models before a paid call.
 
@@ -127,13 +129,15 @@ uv run python scripts/check_gemini.py
 
 This checks the key/model catalogue, then makes **real generation requests** through the bot's reply and structured-JSON memory/style paths. Listing models alone does not prove generation access. The check uses synthetic inputs, sends no Telegram messages, never uploads stored chats, and uses the normal credit cap and usage accounting. Calls can incur Google API charges.
 
+Use a **valid key** for this check. An invalid-key request can pass REST field parsing and still cannot validate model-specific generation settings, billing or regional access.
+
 To also exercise OGG/Opus voice transcription with a sample you authorize sending to Google:
 
 ```bash
 uv run python scripts/check_gemini.py --voice sample.ogg --expect-transcript "expected phrase"
 ```
 
-The transcript is checked without being printed. A failed check exits nonzero. Errors include safe Google status/reason codes, not echoed keys or message contents:
+The transcript is checked without being printed. A failed check exits nonzero. Normal bot errors expose safe Google status/reason codes, not echoed keys or chat contents. For the synthetic text/JSON check only, the CLI also prints Google's error message with the API key redacted so a bare HTTP 400 can be diagnosed:
 
 - `API_KEY_INVALID` / `API_KEY_EXPIRED`: replace the key in AI Studio and `.env`.
 - HTTP 403: check API/IP restrictions, Generative Language API access and regional availability.

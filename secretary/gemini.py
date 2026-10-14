@@ -75,8 +75,7 @@ def _contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def complete(*, system: str, messages: list[dict[str, Any]], model: str | None = None,
-                   max_tokens: int = 4096, json_output: bool = False, audio: bytes | None = None,
-                   frequency_penalty: float = 0.0, presence_penalty: float = 0.0) -> str:
+                   max_tokens: int = 4096, json_output: bool = False, audio: bytes | None = None) -> str:
     """One native turn. Keep secrets in headers and never return thoughts or partial/refused text."""
     model = (model or settings.gemini_model).removeprefix("models/")
     if not re.fullmatch(r"gemini-[A-Za-z0-9._-]+", model):
@@ -102,10 +101,6 @@ async def complete(*, system: str, messages: list[dict[str, Any]], model: str | 
     if json_output:
         # Unlike responseMimeType, responseFormat.text.mimeType is a protobuf enum.
         config["responseFormat"] = {"text": {"mimeType": "APPLICATION_JSON"}}
-    if frequency_penalty:
-        config["frequencyPenalty"] = frequency_penalty
-    if presence_penalty:
-        config["presencePenalty"] = presence_penalty
     resp = await client().post(
         f"{API_URL}/models/{model}:generateContent",
         headers={"x-goog-api-key": settings.gemini_api_key},

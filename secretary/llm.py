@@ -164,10 +164,10 @@ async def _gemini_reply(system_prompt: str, history: list[dict[str, Any]], wrapp
         system += f"\n\n[earlier context summary] {defang(summary)}"
     messages = [*history, {"role": "user", "content": wrapped}]
     log.debug("gemini request: model=%s msgs=%d", settings.gemini_model, len(messages))
+    # Native Gemini rejects repetition penalties; keep those on the OpenRouter path.
     for _ in range(2):  # Same empty-reply retry as the other providers.
         text = _clean_output(await gemini.complete(
             system=system, messages=messages, max_tokens=4096,
-            frequency_penalty=0.4, presence_penalty=0.2,
         ))
         if text:
             return text

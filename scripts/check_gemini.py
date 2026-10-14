@@ -4,6 +4,7 @@
 
 Uses .env and the normal credit/usage accounting. Makes real, potentially billable
 requests; never sends stored chats. Optional voice input is sent to Google.
+Synthetic text/JSON failures print Google's error message with the API key redacted.
 """
 import argparse
 import asyncio
@@ -40,6 +41,7 @@ async def check(args: argparse.Namespace) -> None:
                 raise ValueError(f"Configured model is not available to this key: {model}")
         print("PASS: key and both native models are listed. Checking generation separately...")
         await db.init_db()
+        print(f"Checking reply generation ({settings.gemini_model})...")
         reply = await llm.generate_reply(
             system_prompt="For this connection check, return exactly GEMINI_OK with no punctuation or other text.",
             history=[], user_message="Check the connection.",
@@ -47,6 +49,7 @@ async def check(args: argparse.Namespace) -> None:
         if reply != "GEMINI_OK":
             raise RuntimeError("Reply generation did not return the requested check value (empty, blocked or unexpected output).")
         print(f"PASS: reply generation ({settings.gemini_model}).")
+        print(f"Checking structured JSON ({settings.gemini_extractor_model})...")
         result = json.loads(await memory._chat(
             'Return only a JSON object with exactly these values: {"connection": "ready", "answer": 42}.',
             "Run the JSON connection check.", max_tokens=2000, json_output=True,
@@ -65,6 +68,22 @@ async def check(args: argparse.Namespace) -> None:
         await db.close_db()
 
 
+def _synthetic_error_detail(exc: GeminiAPIError) -> str | None:
+    """CLI-only detail: these requests contain synthetic text, not stored chats."""
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str):
+        return None
+    key = exc.request.headers.get("x-goog-api-key")
+    if key:
+        message = message.replace(key, "[REDACTED]")
+    return " ".join(message.split())[:1200]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--voice", type=Path, help="Optional Telegram OGG/Opus sample to send to Google.")
@@ -79,7 +98,13 @@ def main() -> int:
         fields = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors(include_input=False))
         print(f"FAIL: invalid configuration fields: {fields}", file=sys.stderr)
         return 1
-    except (GeminiAPIError, SetupError, ValueError, RuntimeError) as exc:
+    except GeminiAPIError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        detail = _synthetic_error_detail(exc)
+        if detail:
+            print(f"Google detail (synthetic request): {detail}", file=sys.stderr)
+        return 1
+    except (SetupError, ValueError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     except (httpx.TransportError, OSError) as exc:
