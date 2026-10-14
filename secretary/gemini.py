@@ -2,6 +2,7 @@
 import base64
 import logging
 import re
+from asyncio import sleep
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -84,8 +85,6 @@ async def complete(*, system: str, messages: list[dict[str, Any]], model: str | 
         raise ValueError("GEMINI_API_KEY is required")
     if model not in PRICES and (settings.hosted or settings.credit_limit_usd > 0):
         raise ValueError(f"No Gemini price configured for metered model {model}")
-    if (settings.hosted or settings.credit_limit_usd > 0) and await db.usage_total() >= settings.credit_limit_usd:
-        raise RuntimeError("Gemini credit limit reached")
     contents = _contents(messages)
     if audio is not None:
         contents[-1]["parts"].append({"inlineData": {
@@ -101,12 +100,20 @@ async def complete(*, system: str, messages: list[dict[str, Any]], model: str | 
     if json_output:
         # Unlike responseMimeType, responseFormat.text.mimeType is a protobuf enum.
         config["responseFormat"] = {"text": {"mimeType": "APPLICATION_JSON"}}
-    resp = await client().post(
-        f"{API_URL}/models/{model}:generateContent",
-        headers={"x-goog-api-key": settings.gemini_api_key},
-        json={"systemInstruction": {"parts": [{"text": system}]},
-              "contents": contents, "generationConfig": config},
-    )
+    body = {"systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents, "generationConfig": config}
+    for attempt in range(3):
+        if (settings.hosted or settings.credit_limit_usd > 0) and await db.usage_total() >= settings.credit_limit_usd:
+            raise RuntimeError("Gemini credit limit reached")
+        resp = await client().post(
+            f"{API_URL}/models/{model}:generateContent",
+            headers={"x-goog-api-key": settings.gemini_api_key}, json=body,
+        )
+        if resp.status_code != 503 or attempt == 2:
+            break
+        delay = 2 ** (attempt + 1)
+        log.warning("Gemini HTTP 503 (model=%s); retry %d/2 in %ds", model, attempt + 1, delay)
+        await sleep(delay)
     if not resp.is_success:
         raise GeminiAPIError(resp)
     data = resp.json()

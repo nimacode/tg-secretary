@@ -187,6 +187,7 @@ async def check_gemini() -> None:
     import json
     import httpx
     from datetime import date, datetime, timezone
+    from unittest.mock import AsyncMock, patch
     from pydantic import ValidationError
     from secretary import llm
     from secretary.config import Settings
@@ -266,6 +267,52 @@ async def check_gemini() -> None:
             raise AssertionError("Gemini HTTP failure was swallowed")
         except httpx.HTTPStatusError as exc:
             assert exc.response.status_code == 404
+        assert not replies
+
+        # A transient outage recovers without another consumer-visible reply or
+        # a usage row for the failed attempts; permanent/quota errors still fail.
+        retry_before = await db.usage_total()
+        replies.extend([503, 503, candidate("STOP", {"text": "Recovered"})])
+        with patch.object(gemini, "sleep", new=AsyncMock()):
+            assert await llm.generate_reply(system_prompt="sys", history=[], user_message="hi") == "Recovered"
+        assert abs(await db.usage_total() - retry_before - per_call) < 1e-12
+
+        replies.append(429)
+        try:
+            await gemini.complete(system="sys", messages=[{"role": "user", "content": "hi"}])
+            raise AssertionError("quota error was retried or swallowed")
+        except GeminiAPIError as exc:
+            assert exc.status_code == 429
+
+        replies.extend([503, 503, 503])
+        with patch.object(gemini, "sleep", new=AsyncMock()):
+            try:
+                await llm.generate_reply(system_prompt="sys", history=[], user_message="hi")
+                raise AssertionError("persistent outage did not fail after bounded retries")
+            except GeminiAPIError as exc:
+                assert exc.status_code == 503
+        assert not replies
+
+        # Cancellation and a cap exhausted while waiting must stop before
+        # another potentially billable generation request.
+        replies.append(503)
+        with patch.object(gemini, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            try:
+                await gemini.complete(system="sys", messages=[{"role": "user", "content": "hi"}])
+                raise AssertionError("retry ignored cancellation")
+            except asyncio.CancelledError:
+                pass
+
+        async def exhaust_during_wait(_delay: float) -> None:
+            cfg.credit_limit_usd = await db.usage_total()
+
+        replies.append(503)
+        with patch.object(gemini, "sleep", new=exhaust_during_wait):
+            try:
+                await gemini.complete(system="sys", messages=[{"role": "user", "content": "hi"}])
+                raise AssertionError("retry ignored credit exhausted while waiting")
+            except RuntimeError:
+                pass
         assert not replies
 
         # Both reply and background/voice calls stop before another paid request.

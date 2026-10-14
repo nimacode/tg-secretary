@@ -115,6 +115,8 @@ No OpenRouter key is needed. Native Gemini IDs have no `google/` prefix. Calls u
 
 The native Gemini path intentionally omits `frequencyPenalty` and `presencePenalty`: [Gemini 3.6 Flash and newer reject them](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/content-generation-parameters#token-penalization-parameters). A field appearing in the generic `GenerationConfig` reference does not mean every model accepts it. OpenRouter retains its existing temperature and repetition penalties.
 
+Native Gemini HTTP 503 (`UNAVAILABLE`, temporary service capacity/outage) is retried twice, waiting 2 then 4 seconds, on the **same model and provider**. Each generation has at most three HTTP attempts; the local credit cap is checked before every attempt and cancellation interrupts the wait. Other HTTP errors, including invalid keys, depleted billing credits and HTTP 429 quota limits, fail immediately. Auto-send still checks owner activity and newer messages before sending and discards superseded replies. A persistent 503 is reported after retries are exhausted; this does not make an unavailable Google service reachable.
+
 Gemini cost estimates use [standard paid-tier prices](https://ai.google.dev/gemini-api/docs/pricing), including thinking, cached input and audio tokens; they are not a lookup of Google's billing balance or free-tier usage. Metered models are `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite`. Flash introductory prices switch to the published standard rate on January 1, 2027. Other native models can run standalone without a cap, but USD accounting is unavailable and the credit panel is hidden; hosted/capped configurations reject unpriced models before a paid call.
 
 ### Verify the official Gemini connection
@@ -145,6 +147,7 @@ The transcript is checked without being printed. A failed check exits nonzero. N
 - HTTP 402: add Google project billing credits; the local credit cap is not Google's balance.
 - HTTP 429: check the project's model quota, rate limits and billing tier.
 - HTTP 404: select a native model available to this key, without the OpenRouter `google/` prefix.
+- HTTP 503: the model service is temporarily unavailable/overloaded. The bot retries twice before reporting failure. If it persists, check [Gemini service status](https://aistudio.google.com/status), wait, or explicitly choose another supported model; `/preview` succeeding does not guarantee capacity for the next request.
 
 After a successful check, restart with `pm2 restart tg-secretary` (or start with `pm2 start ecosystem.config.cjs`), then DM `/preview سلام` to the bot. To test auto-replies, remember the default 600-second owner-active cooldown; `/cooldown 0` temporarily disables it.
 

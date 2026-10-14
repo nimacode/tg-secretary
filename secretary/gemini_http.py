@@ -32,6 +32,7 @@ class GeminiAPIError(httpx.HTTPStatusError):
             403: "Check key restrictions, Generative Language API access and the server's supported region.",
             404: "The model is unavailable on this API; select a native model listed for this key.",
             429: "The API project's quota or rate limit is exhausted; check limits and billing in AI Studio.",
+            503: "The model service is temporarily unavailable or overloaded. Try again later.",
         }.get(response.status_code, "Check the Gemini API service status and network/proxy configuration.")
         if reason in {"API_KEY_INVALID", "API_KEY_EXPIRED"}:
             hint = "Create a valid API key in Google AI Studio and update GEMINI_API_KEY."
